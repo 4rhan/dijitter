@@ -1,0 +1,36 @@
+[project]
+name = "dijitter"
+version = "0.1.0"
+description = "CPU env for running upstream ABC (amazon-far/abc) sim + viser on a laptop; pi0.5 + ACG experiments"
+requires-python = ">=3.12,<3.13"
+# Mirrors third_party/abc/pyproject.toml, but with CPU torch so it fits a laptop without an NVIDIA GPU.
+dependencies = [
+    "numpy",
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "mujoco~=3.8.0",
+    "mujoco-warp==3.8.0.3",
+    "warp-lang==1.13.0",
+    "mjviser",
+    "viser",
+    "imageio[ffmpeg]",
+    "gymnasium>=1.1",
+    "av",
+    "ftfy",
+    "regex",
+    "sentencepiece>=0.2.0",
+    "tyro",
+    "huggingface_hub",
+    "mcap",
+    "mcap-protobuf-support",
+    "lerobot==0.5.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

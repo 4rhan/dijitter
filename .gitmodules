@@ -1,0 +1,9 @@
+[submodule "third_party/abc"]
+	path = third_party/abc
+	url = https://github.com/amazon-far/abc.git
+[submodule "third_party/ACG"]
+	path = third_party/ACG
+	url = https://github.com/DAVIAN-Robotics/ACG.git
+[submodule "third_party/yam-abc-reproduce"]
+	path = third_party/yam-abc-reproduce
+	url = https://github.com/i2rt-robotics/yam-abc-reproduce.git
