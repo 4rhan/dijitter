@@ -25,8 +25,8 @@ dependencies = [
     "huggingface_hub",
     "mcap",
     "mcap-protobuf-support",
-    # pi05 policy + LoRA (peft) fine-tuning
-    "lerobot[pi,peft]==0.6.1",
+    # pi05 policy + LoRA (peft) fine-tuning; training pulls in datasets + accelerate
+    "lerobot[pi,peft,training]==0.6.1",
     # websocket + msgpack protocol shared with the policy server
     "openpi-client",
 ]
