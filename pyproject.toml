@@ -24,11 +24,14 @@ dependencies = [
     "mcap",
     "mcap-protobuf-support",
     "lerobot==0.5.1",
+    # websocket + msgpack protocol shared with the openpi policy server
+    "openpi-client",
 ]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
+openpi-client = { path = "third_party/yam-abc-reproduce/third_party/policy/openpi/packages/openpi-client", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

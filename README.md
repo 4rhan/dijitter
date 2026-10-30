@@ -17,7 +17,10 @@ dijitter/
 ├── pyproject.toml, uv.lock        laptop env (CPU torch): sim, viser, LeRobot conversion
 ├── scripts/
 │   ├── abc_to_lerobot.py          ABC sim episodes -> LeRobot v3.0 (keys match openpi pi05_yam)
-│   └── check_lerobot.py           verify a converted dataset against its source episodes
+│   ├── check_lerobot.py           verify a converted dataset against its source episodes
+│   ├── metrics.py                 JerkRMS / ATV (trajectories) + intra-chunk and chunk-switch smoothness
+│   ├── eval_sim.py                closed-loop sim eval against a policy server; logs success, latency, chunks
+│   └── mock_policy_server.py      GPU-free stand-in server (hold / demo replay / noisy) for testing eval_sim
 ├── third_party/                   git submodules (pinned)
 │   ├── abc/                       amazon-far/abc: MuJoCo YAM sim, sim data, viser viewers
 │   ├── yam-abc-reproduce/         i2rt YAM pipeline + vendored openpi (π0.5, pi05_yam_lora)
@@ -33,7 +36,9 @@ Where things live:
 | Sim + episode viewer | `third_party/abc/viz_episode.py`, `third_party/abc/abc_sim/` |
 | Sim data / assets (downloaded, gitignored there) | `third_party/abc/cache/`, `third_party/abc/abc_sim/models/assets*` |
 | π0.5 model (ACG goes in `sample_actions`) | `third_party/yam-abc-reproduce/third_party/policy/openpi/src/openpi/models/pi0.py` |
-| π0.5 YAM configs | `.../openpi/src/openpi/training/config.py` (`pi05_yam_lora`) |
+| π0.5 YAM configs | `.../openpi/src/openpi/training/config.py` (`pi05_yam_lora_inhand`, ours) |
+| ACG tests | `.../openpi/src/openpi/models/acg_test.py` |
+| Policy server (`--acg-scale`) | `third_party/yam-abc-reproduce/yam_abc_reproduce/deploy/servers/openpi_server.py` |
 | ACG reference | `third_party/ACG/libs/robomimic/robomimic/algo/guidance/acg.py` |
 
 ## Setup
@@ -66,6 +71,26 @@ python scripts/check_lerobot.py  --repo-id abc_inhand_transfer            # expe
 
 The output goes to `data/lerobot/abc_inhand_transfer`. Actions stay absolute; the openpi YAM config
 converts arm joints to deltas itself.
+
+## Metrics and the eval loop (laptop, no GPU)
+
+```bash
+python scripts/metrics.py --max-episodes 200                    # jitter of the recorded demos
+
+# terminal 1: a stand-in server that replays one held-out demo
+python scripts/mock_policy_server.py --mode replay --episode-dir third_party/abc/cache/val_sim/<episode_dir>
+# terminal 2: run the sim against it (same client as for π0.5)
+python scripts/eval_sim.py --replay-episode third_party/abc/cache/val_sim/<episode_dir> --num-episodes 1 --tag mock_replay --save-video
+```
+
+`--mode noisy` adds noise to every action: the metrics should clearly rise relative to `replay`.
+
+## ACG
+
+`Pi0.sample_actions(..., acg_scale=s)` runs a second denoising pass per step in which action tokens can't
+attend to each other (each still sees image, text and state, plus itself), then uses
+`v = v + (s - 1) * (v - v_incoherent)`. `acg_scale=None` (the default) is the unchanged baseline. On the server, pass `--acg-scale`.
+At present every layer is perturbed; the paper perturbs only some middle layers (that's a TODO).
 
 ## GPU box: LoRA fine-tune π0.5
 
