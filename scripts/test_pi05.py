@@ -5,10 +5,15 @@ quantile normalization, our camera keys renamed to the ones pi05_base was traine
 `predict_action_chunk` on a few dataset frames.
 
 pi05_base has never seen YAM, so its actions are not expected to match the demos; this checks the
-pipeline (shapes, normalization, GPU memory, latency) before fine-tuning and before ACG.
+pipeline (shapes, normalization, GPU memory, latency) before fine-tuning.
+
+With --acg-scales, the same frames are re-run with ACG (scripts/acg_pi05.py) under the same noise
+seed and compared to the baseline: scale 1.0 must reproduce it exactly, larger scales should differ
+and give lower intra-chunk jerk, at about twice the latency.
 
 Usage:
   python scripts/test_pi05.py --repo-id abc_inhand_transfer
+  python scripts/test_pi05.py --acg-scales 1.0 2.0 3.0
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ class Args:
     policy: str = "lerobot/pi05_base"
     num_frames: int = 5
     """Frames to predict on (spread across episode 0)."""
+    acg_scales: tuple[float, ...] = ()
+    """ACG scales to compare against the baseline (e.g. 1.0 2.0 3.0)."""
     dtype: str = "bfloat16"
     device: str = "cuda"
     seed: int = 0
@@ -108,9 +115,28 @@ def main(args: Args) -> None:
     ep_len = int(ds.meta.episodes["length"][0])
     chunk = policy.config.chunk_size
     starts = np.linspace(0, max(ep_len - chunk, 0), args.num_frames).astype(int)
-    latencies = []
-    for i, t in enumerate(starts):
-        frame = ds[int(t)]
+    frames = [ds[int(t)] for t in starts]
+    demos = [np.stack([ds[int(t) + k]["action"].numpy() for k in range(min(chunk, ep_len - t))]) for t in starts]
+
+    baseline = run(policy, pre, post, frames, demos, starts, args, label="baseline")
+    if args.acg_scales:
+        from acg_pi05 import set_acg_scale
+
+        print("\nACG vs baseline (same frames, same noise):")
+        for scale in args.acg_scales:
+            set_acg_scale(policy, scale)
+            preds = run(policy, pre, post, frames, demos, starts, args, label=f"acg {scale:g}", verbose=False)
+            diff = max(np.abs(p - b).max() for p, b in zip(preds, baseline, strict=True))
+            print(f"    max |acg - baseline| = {diff:.2e} rad")
+        set_acg_scale(policy, None)
+    if args.device == "cuda":
+        print(f"peak GPU memory: {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+
+
+def run(policy, pre, post, frames, demos, starts, args: Args, label: str, verbose: bool = True) -> list[np.ndarray]:
+    """Predict a chunk per frame; print per-frame (verbose) and summary stats; return the chunks."""
+    preds, latencies, errs, jerks = [], [], [], []
+    for t, frame, demo in zip(starts, frames, demos, strict=True):
         if args.device == "cuda":
             torch.cuda.synchronize()
         t1 = time.perf_counter()
@@ -118,22 +144,22 @@ def main(args: Args) -> None:
         if args.device == "cuda":
             torch.cuda.synchronize()
         latencies.append(time.perf_counter() - t1)
-
-        gt = np.stack([ds[int(t) + k]["action"].numpy() for k in range(min(chunk, ep_len - t))])
-        n = min(len(gt), len(pred))
-        err = np.abs(pred[:n] - gt[:n]).mean()
-        m = chunk_metrics(pred[None], executed_steps=len(pred))
-        print(
-            f"  frame {t:4d}: chunk {pred.shape}  |pred-demo| {err:.3f} rad  "
-            f"range [{pred.min():+.2f}, {pred.max():+.2f}]  intra JerkRMS {m['intra_jerk_rms']:.1f}  "
-            f"{latencies[-1] * 1000:.0f} ms"
-        )
-
+        n = min(len(demo), len(pred))
+        errs.append(np.abs(pred[:n] - demo[:n]).mean())
+        jerks.append(chunk_metrics(pred[None], executed_steps=len(pred))["intra_jerk_rms"])
+        preds.append(pred)
+        if verbose:
+            print(
+                f"  frame {t:4d}: chunk {pred.shape}  |pred-demo| {errs[-1]:.3f} rad  "
+                f"range [{pred.min():+.2f}, {pred.max():+.2f}]  intra JerkRMS {jerks[-1]:.1f}  "
+                f"{latencies[-1] * 1000:.0f} ms"
+            )
     warm = latencies[1:] or latencies
-    print(f"latency: first {latencies[0] * 1000:.0f} ms, then {np.mean(warm) * 1000:.0f} ms/chunk")
-    if args.device == "cuda":
-        print(f"peak GPU memory: {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
-
+    print(
+        f"  {label:>9}: |pred-demo| {np.mean(errs):.3f} rad  intra JerkRMS {np.mean(jerks):.1f}  "
+        f"latency {np.mean(warm) * 1000:.0f} ms/chunk (first {latencies[0] * 1000:.0f} ms)"
+    )
+    return preds
 
 if __name__ == "__main__":
     main(tyro.cli(Args))
