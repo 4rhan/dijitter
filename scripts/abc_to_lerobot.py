@@ -57,7 +57,8 @@ class Args:
     """Convert only the first N episodes (for a quick check)."""
     overwrite: bool = False
     vcodec: str = "h264"
-    """Video codec: "h264" (CPU) or "h264_nvenc" (NVIDIA GPU encoder; LeRobot >= 0.6 only)."""
+    """Video codec passed to LeRobot. "h264" (CPU) is fast enough (~3 s/episode); "h264_nvenc" hung
+    with LeRobot 0.6.1 streaming encoding on the GPU box."""
 
 
 def load_episode(ep: Path) -> tuple[dict, np.ndarray, np.ndarray]:
