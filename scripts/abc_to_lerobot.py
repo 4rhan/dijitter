@@ -56,6 +56,8 @@ class Args:
     max_episodes: int | None = None
     """Convert only the first N episodes (for a quick check)."""
     overwrite: bool = False
+    vcodec: str = "h264"
+    """Video codec: "h264" (CPU) or "h264_nvenc" (NVIDIA GPU encoder; LeRobot >= 0.6 only)."""
 
 
 def load_episode(ep: Path) -> tuple[dict, np.ndarray, np.ndarray]:
@@ -67,12 +69,13 @@ def load_episode(ep: Path) -> tuple[dict, np.ndarray, np.ndarray]:
 def load_frames(video: Path, cameras: list[str]) -> dict[str, np.ndarray]:
     """Decode the combined video and split it into per-camera (T, H, W, 3) uint8 arrays."""
     with av.open(str(video)) as container:
+        container.streams.video[0].thread_type = "AUTO"  # multi-threaded decode
         frames = np.stack([f.to_ndarray(format="rgb24") for f in container.decode(video=0)])
     h = frames.shape[1] // len(cameras)
     return {cam: frames[:, i * h : (i + 1) * h] for i, cam in enumerate(cameras)}
 
 
-def create_dataset(repo_id: str, root: Path, height: int, width: int):
+def create_dataset(repo_id: str, root: Path, height: int, width: int, vcodec: str):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     features = {
@@ -81,10 +84,20 @@ def create_dataset(repo_id: str, root: Path, height: int, width: int):
     }
     features["observation.state"] = {"dtype": "float32", "shape": (STATE_DIM,), "names": NAMES}
     features["action"] = {"dtype": "float32", "shape": (STATE_DIM,), "names": NAMES}
-    kwargs = {}
-    # H.264 encodes far faster than LeRobot's AV1 default on a laptop CPU, when this version allows choosing.
-    if "vcodec" in inspect.signature(LeRobotDataset.create).parameters:
-        kwargs["vcodec"] = "h264"
+    # H.264 encodes far faster than LeRobot's AV1 default. The codec option moved between versions:
+    # 0.5 takes create(vcodec=...); 0.6 takes an RGBEncoderConfig and can stream frames straight into
+    # the encoder instead of writing PNGs first.
+    params = inspect.signature(LeRobotDataset.create).parameters
+    kwargs = {"image_writer_threads": 4}
+    if "rgb_encoder" in params:
+        from lerobot.configs.video import RGBEncoderConfig
+
+        nvenc = vcodec.endswith("_nvenc")
+        kwargs["rgb_encoder"] = RGBEncoderConfig(vcodec=vcodec, crf=None if nvenc else 30)
+        kwargs["streaming_encoding"] = True
+        kwargs["image_writer_threads"] = 0
+    elif "vcodec" in params:
+        kwargs["vcodec"] = vcodec
     return LeRobotDataset.create(
         repo_id=repo_id,
         fps=FPS,
@@ -92,7 +105,6 @@ def create_dataset(repo_id: str, root: Path, height: int, width: int):
         root=root,
         robot_type="yam",
         use_videos=True,
-        image_writer_threads=4,
         **kwargs,
     )
 
@@ -125,7 +137,7 @@ def main(args: Args) -> None:
             print(f"  [warn] {ep.name}: {len(state)} steps but {T} video frames; truncating")
         if ds is None:
             h, w = frames[cameras[0]].shape[1:3]
-            ds = create_dataset(args.repo_id, root, h, w)
+            ds = create_dataset(args.repo_id, root, h, w, args.vcodec)
         prompt = meta["instruction"]
         for t in range(T):
             frame = {"observation.state": state[t], "action": action[t], "task": prompt}
