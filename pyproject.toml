@@ -1,9 +1,11 @@
 [project]
 name = "dijitter"
 version = "0.1.0"
-description = "CPU env for running upstream ABC (amazon-far/abc) sim + viser on a laptop; pi0.5 + ACG experiments"
+description = "pi0.5 + ACG experiments on YAM in the ABC (amazon-far/abc) MuJoCo sim, with LeRobot pi0.5"
 requires-python = ">=3.12,<3.13"
-# Mirrors third_party/abc/pyproject.toml, but with CPU torch so it fits a laptop without an NVIDIA GPU.
+# Mirrors third_party/abc/pyproject.toml. Pick the torch build with an extra:
+#   laptop (no NVIDIA GPU): uv sync --extra cpu
+#   GPU box:                uv sync --extra gpu
 dependencies = [
     "numpy",
     "torch==2.10.0",
@@ -23,17 +25,39 @@ dependencies = [
     "huggingface_hub",
     "mcap",
     "mcap-protobuf-support",
-    "lerobot==0.5.1",
-    # websocket + msgpack protocol shared with the openpi policy server
+    # pi05 policy + LoRA (peft) fine-tuning
+    "lerobot[pi,peft]==0.6.1",
+    # websocket + msgpack protocol shared with the policy server
     "openpi-client",
 ]
 
+[project.optional-dependencies]
+cpu = ["torch==2.10.0", "torchvision==0.25.0"]
+gpu = ["torch==2.10.0", "torchvision==0.25.0"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "gpu" }]]
+# Upstream openpi-client pins numpy<2, but lerobot 0.6.1 needs numpy>=2. The client works on
+# numpy 2 (i2rt's yam-abc-reproduce copy relaxes the same pin to <2.3).
+override-dependencies = ["numpy>=2.0.0,<2.3.0"]
+
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
-openpi-client = { path = "third_party/yam-abc-reproduce/third_party/policy/openpi/packages/openpi-client", editable = true }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "gpu" },
+]
+openpi-client = { git = "https://github.com/Physical-Intelligence/openpi.git", subdirectory = "packages/openpi-client" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true

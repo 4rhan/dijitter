@@ -1,7 +1,8 @@
 # π0.5 + ACG on YAM (sim) — TODO
 
-Scope: YAM in simulation only (ABC MuJoCo sim), LoRA fine-tune only (`pi05_yam_lora`).
-LIBERO (`pi05_libero`) is used only as an ACG sanity check on a pretrained checkpoint.
+Scope: YAM in simulation only (ABC MuJoCo sim), LoRA fine-tune only.
+Stack (from 2026-10-30): LeRobot 0.6.1 PyTorch π0.5, starting from `lerobot/pi05_base` (already on the GPU box). No other checkpoints, no LIBERO.
+The Day 1 JAX/openpi ACG edits (in the `yam-abc-reproduce` submodule) are dropped; ACG gets ported to LeRobot `modeling_pi05.py`.
 Real robot comes later, in the `karma` repo.
 
 Layout: `third_party/abc` (sim + data) · `third_party/yam-abc-reproduce` (openpi π0.5) · `third_party/ACG` (reference) · `scripts/` (our code) · `data/`, `outputs/` (gitignored)
@@ -23,33 +24,21 @@ Layout: `third_party/abc` (sim + data) · `third_party/yam-abc-reproduce` (openp
   - [x] `python scripts/metrics.py --max-episodes 200` → demo jitter reference: actions JerkRMS 312.5 / ATV 0.0064; states JerkRMS 140.7 / ATV 0.0060 (teleop commands are steppy)
   - [x] mock loop: `mock_policy_server.py --mode replay` + `eval_sim.py --replay-episode` → demo reproduces in sim, evaluator fires (success at step 291, 19 ms round trip)
   - [x] mock loop `--mode noisy` (0.01 rad): JerkRMS 297 → 1268, ATV 0.0061 → 0.0142, switch jump 0 → 0.011; `--mode hold` in random worlds: fails, truncates correctly
-- [ ] → moved to Day 2: ACG tests, fork + push
+- [ ] ~~JAX ACG tests, fork `yam-abc-reproduce`~~ (dropped: switched to LeRobot)
 - [ ] (optional) `viz_episode.py --mode physics`: confirm recorded actions re-simulate the demo
 - [ ] (later) ACG per-layer variant: perturb only middle layers like the paper (needs a per-layer mask in `gemma.py`)
 
 ## Day 2: GPU box (2026-10-30)
-Get code on the box
-- [ ] Copy the repo over (fork not pushed yet): `rsync -a --exclude data --exclude outputs --exclude .venv ~/post-vla/dijitter <box>:~/`
-- [ ] In `third_party/yam-abc-reproduce`: `uv sync --extra gui --extra convert --group openpi`
-- [ ] Run ACG tests: `uv run pytest third_party/policy/openpi/src/openpi/models/acg_test.py`
-
-LIBERO sanity check: ACG on a known-good checkpoint (`pi05_libero`, no training)
-- [ ] Clone the sim: `cd third_party/policy/openpi && git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git third_party/libero`
-- [ ] Client venv (py3.8), per `examples/libero/README.md` "Without Docker"; headless box → `MUJOCO_GL=egl`
-- [ ] Baseline server: `uv run python third_party/policy/openpi/scripts/serve_policy.py --env LIBERO` (pulls `gs://openpi-assets/checkpoints/pi05_libero`)
-- [ ] Client: `python examples/libero/main.py --args.task-suite-name libero_spatial --args.num-trials-per-task 5` → note success (paper ~98%) + latency
-- [ ] ACG server: same + `--acg-scale 2.0` (`serve_policy.py` now forwards `--acg-scale` / `--num-steps`); rerun client, compare success
-- [ ] Pass: ACG success ≈ baseline, no crash, latency ~2× (two passes per denoising step)
-
-YAM sim (data prep can run on CPU while LIBERO runs)
-- [ ] Download sim data on the box (`prepare.py --sim-data sim_inhand_transfer_the_item_to_other_side`)
-- [ ] Convert 100 episodes → `data/lerobot/abc_inhand_transfer`, then `check_lerobot.py` (expect 100/100 OK)
-- [ ] Point openpi at it (`HF_LEROBOT_HOME=$PWD/data/lerobot`)
-- [ ] `compute_norm_stats.py --config-name pi05_yam_lora_inhand` (also a dry run of the data pipeline)
-- [ ] Stop the LIBERO server (frees GPU memory), then LoRA fine-tune 10k steps (`train.py pi05_yam_lora_inhand --exp-name=inhand_sim`), let it run overnight
-- [ ] Serve: `openpi_server.py --config pi05_yam_lora_inhand --checkpoint <ckpt> --image-key-map top=image,left=left_wrist,right=right_wrist --flatten-prefix observation/ --state-key observation/state [--acg-scale 2.0]`
-- [ ] Laptop: `eval_sim.py --host <box-ip> --tag baseline` (needs port 8000 reachable, e.g. `ssh -L 8000:localhost:8000 <box>`)
-- [ ] Fork `yam-abc-reproduce`, repoint the submodule, push (then the box can `git pull` instead of rsync)
+Box layout (same as expo-ft): code in `/home/sra/arhan/dijitter`; env, caches, data, outputs in `/usr/local/models/sra-arhan-dijitter` (`data/`, `outputs/` in the repo are symlinks there). `source /usr/local/models/sra-arhan-dijitter/env.sh` first. `pi05_base` comes from the shared `/usr/local/models/hf-hub`.
+- [x] Clone `dijitter` + `third_party/abc` on the box, make the SSD folders + `env.sh`
+- [x] `pyproject.toml`: `cpu` / `gpu` torch extras, `lerobot[pi,peft]==0.6.1`, `openpi-client` from git
+- [ ] Box env: `UV_PROJECT_ENVIRONMENT=$A/venv uv sync --extra gpu`; check torch sees the 4090 and `pi05_base` loads
+- [ ] Sim data on the box (`prepare.py --sim-data sim_inhand_transfer_the_item_to_other_side`)
+- [ ] Convert 100 episodes → `data/lerobot/abc_inhand_transfer`, then `check_lerobot.py` (re-check under LeRobot 0.6.1)
+- [ ] Port ACG to LeRobot π0.5 (`denoise_step` patch from our repo, no LeRobot fork); test: scale 1.0 == baseline, 2.0 differs
+- [ ] LoRA fine-tune `pi05_base` on the converted data (`lerobot-train --policy.type=pi05 --peft...`); needs ~22 GB GPU free (box is shared)
+- [ ] Policy server wrapping LeRobot π0.5 (same websocket protocol, so `eval_sim.py` is unchanged), with `--acg-scale`
+- [ ] `eval_sim.py --tag baseline`, then with ACG
 
 ## Day 3+: experiments
 - [ ] Baseline: success rate + latency over N seeds, ACG off
