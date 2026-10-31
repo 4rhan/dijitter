@@ -11,13 +11,20 @@ Actions stay absolute; the openpi config converts arm joints to deltas itself.
 
 Usage:
   python scripts/abc_to_lerobot.py --repo-id abc_inhand_transfer --max-episodes 20
+  python scripts/abc_to_lerobot.py --max-episodes 100 --workers 8   # shards in parallel, then merged
+
+LeRobot's writer spends ~30 s of single-threaded Python per episode (per-frame image stats in the
+encoder threads), so --workers converts contiguous shards in separate processes and merges them in
+order with LeRobot's aggregate_datasets. check_lerobot.py verifies the result episode by episode.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import dataclasses
 import inspect
 import json
+import multiprocessing
 import shutil
 import time
 from pathlib import Path
@@ -29,6 +36,7 @@ import tyro
 REPO = Path(__file__).resolve().parents[1]
 STATE_DIM = 14
 FPS = 30
+MAX_EPISODE_FRAMES = 4000  # longest ABC sim episode is 1030 steps
 NAMES = [
     *[f"left_joint_{i}" for i in range(6)],
     "left_gripper",
@@ -57,8 +65,10 @@ class Args:
     """Convert only the first N episodes (for a quick check)."""
     overwrite: bool = False
     vcodec: str = "h264"
-    """Video codec passed to LeRobot. "h264" (CPU) is fast enough (~3 s/episode); "h264_nvenc" hung
-    with LeRobot 0.6.1 streaming encoding on the GPU box."""
+    """Video codec passed to LeRobot. "h264" runs on the CPU; "h264_nvenc" hung with LeRobot 0.6.1
+    streaming encoding on the GPU box."""
+    workers: int = 1
+    """Parallel converter processes (each takes a contiguous shard of the episodes)."""
 
 
 def load_episode(ep: Path) -> tuple[dict, np.ndarray, np.ndarray]:
@@ -96,6 +106,9 @@ def create_dataset(repo_id: str, root: Path, height: int, width: int, vcodec: st
         nvenc = vcodec.endswith("_nvenc")
         kwargs["rgb_encoder"] = RGBEncoderConfig(vcodec=vcodec, crf=None if nvenc else 30)
         kwargs["streaming_encoding"] = True
+        # The streaming encoder DROPS a frame when its queue is full (it is built for live recording),
+        # and we feed frames far faster than real time. A queue longer than any episode never fills.
+        kwargs["encoder_queue_maxsize"] = MAX_EPISODE_FRAMES
         kwargs["image_writer_threads"] = 0
     elif "vcodec" in params:
         kwargs["vcodec"] = vcodec
@@ -108,6 +121,39 @@ def create_dataset(repo_id: str, root: Path, height: int, width: int, vcodec: st
         use_videos=True,
         **kwargs,
     )
+
+
+def convert(episodes: list[Path], repo_id: str, root: Path, vcodec: str, tag: str = "") -> int:
+    """Write `episodes` (in order) to a new LeRobot dataset at `root`; returns the frame count."""
+    ds = None
+    total_frames, t0 = 0, time.perf_counter()
+    for n, ep in enumerate(episodes, 1):
+        meta, state, action = load_episode(ep)
+        cameras = meta["cameras"]
+        frames = load_frames(ep / meta["videos"]["combined"], cameras)
+        T = min(len(state), *(len(v) for v in frames.values()))
+        if T != len(state):
+            print(f"  [warn] {ep.name}: {len(state)} steps but {T} video frames; truncating")
+        if T > MAX_EPISODE_FRAMES:
+            raise SystemExit(f"{ep.name}: {T} frames > MAX_EPISODE_FRAMES={MAX_EPISODE_FRAMES}; raise it")
+        if ds is None:
+            h, w = frames[cameras[0]].shape[1:3]
+            ds = create_dataset(repo_id, root, h, w, vcodec)
+        prompt = meta["instruction"]
+        for t in range(T):
+            frame = {"observation.state": state[t], "action": action[t], "task": prompt}
+            for cam, key in CAMERA_KEYS.items():
+                frame[key] = frames[cam][t]
+            ds.add_frame(frame)
+        ds.save_episode()
+        total_frames += T
+        elapsed = time.perf_counter() - t0
+        eta = elapsed / n * (len(episodes) - n)
+        print(f"  {tag}[{n}/{len(episodes)}] {ep.name} T={T}  elapsed {elapsed / 60:.1f} min  eta {eta / 60:.1f} min", flush=True)
+
+    if hasattr(ds, "finalize"):
+        ds.finalize()  # LeRobot v3 buffers parquet/video writers until finalize
+    return total_frames
 
 
 def main(args: Args) -> None:
@@ -125,35 +171,32 @@ def main(args: Args) -> None:
         episodes = episodes[: args.max_episodes]
     if not episodes:
         raise SystemExit(f"no episodes found under {src}")
-    print(f"converting {len(episodes)} episodes from {src} -> {root}")
+    workers = max(1, min(args.workers, len(episodes)))
+    print(f"converting {len(episodes)} episodes from {src} -> {root} ({workers} worker(s))")
+    t0 = time.perf_counter()
 
-    ds = None
-    total_frames, t0 = 0, time.perf_counter()
-    for n, ep in enumerate(episodes, 1):
-        meta, state, action = load_episode(ep)
-        cameras = meta["cameras"]
-        frames = load_frames(ep / meta["videos"]["combined"], cameras)
-        T = min(len(state), *(len(v) for v in frames.values()))
-        if T != len(state):
-            print(f"  [warn] {ep.name}: {len(state)} steps but {T} video frames; truncating")
-        if ds is None:
-            h, w = frames[cameras[0]].shape[1:3]
-            ds = create_dataset(args.repo_id, root, h, w, args.vcodec)
-        prompt = meta["instruction"]
-        for t in range(T):
-            frame = {"observation.state": state[t], "action": action[t], "task": prompt}
-            for cam, key in CAMERA_KEYS.items():
-                frame[key] = frames[cam][t]
-            ds.add_frame(frame)
-        ds.save_episode()
-        total_frames += T
-        elapsed = time.perf_counter() - t0
-        eta = elapsed / n * (len(episodes) - n)
-        print(f"  [{n}/{len(episodes)}] {ep.name} T={T}  elapsed {elapsed / 60:.1f} min  eta {eta / 60:.1f} min", flush=True)
+    if workers == 1:
+        total_frames = convert(episodes, args.repo_id, root, args.vcodec)
+    else:
+        from lerobot.datasets.aggregate import aggregate_datasets
 
-    if hasattr(ds, "finalize"):
-        ds.finalize()  # LeRobot v3 buffers parquet/video writers until finalize
-    print(f"done: {len(episodes)} episodes, {total_frames} frames -> {root}")
+        shard_dir = root.parent / f"{args.repo_id}.shards"
+        shutil.rmtree(shard_dir, ignore_errors=True)
+        shards = [list(s) for s in np.array_split(np.array(episodes, dtype=object), workers)]
+        ids = [f"{args.repo_id}_shard{i}" for i in range(workers)]
+        roots = [shard_dir / i for i in ids]
+        # spawn: the LeRobot writer starts threads, which do not survive a fork
+        ctx = multiprocessing.get_context("spawn")
+        with concurrent.futures.ProcessPoolExecutor(workers, mp_context=ctx) as pool:
+            jobs = [
+                pool.submit(convert, shard, i, r, args.vcodec, f"shard{k} ")
+                for k, (shard, i, r) in enumerate(zip(shards, ids, roots, strict=True))
+            ]
+            total_frames = sum(j.result() for j in jobs)
+        print(f"merging {workers} shards -> {root}")
+        aggregate_datasets(ids, args.repo_id, roots=roots, aggr_root=root)
+        shutil.rmtree(shard_dir)
+    print(f"done: {len(episodes)} episodes, {total_frames} frames -> {root} in {(time.perf_counter() - t0) / 60:.1f} min")
 
 
 if __name__ == "__main__":

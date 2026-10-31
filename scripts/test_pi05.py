@@ -123,12 +123,20 @@ def main(args: Args) -> None:
         from acg_pi05 import set_acg_scale
 
         print("\nACG vs baseline (same frames, same noise):")
+        failures = []
         for scale in args.acg_scales:
             set_acg_scale(policy, scale)
             preds = run(policy, pre, post, frames, demos, starts, args, label=f"acg {scale:g}", verbose=False)
             diff = max(np.abs(p - b).max() for p, b in zip(preds, baseline, strict=True))
             print(f"    max |acg - baseline| = {diff:.2e} rad")
+            if scale == 1.0 and diff > 1e-4:
+                failures.append(f"scale 1.0 should reproduce the baseline, differs by {diff:.2e}")
+            if scale != 1.0 and diff == 0.0:
+                failures.append(f"scale {scale:g} has no effect: the incoherent pass is not perturbing the model")
         set_acg_scale(policy, None)
+        if failures:
+            raise SystemExit("ACG check failed:\n  " + "\n  ".join(failures))
+        print("ACG check passed")
     if args.device == "cuda":
         print(f"peak GPU memory: {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
 

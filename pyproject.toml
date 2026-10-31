@@ -29,6 +29,10 @@ dependencies = [
     "lerobot[pi,peft,training]==0.6.1",
     # websocket + msgpack protocol shared with the policy server
     "openpi-client",
+    # Video decoding for training. lerobot allows torchcodec up to 0.11, but 0.11 is built for torch
+    # 2.11 and fails to load on 2.10 (LeRobot then falls back to pyav, ~4.5x slower per sample).
+    # Needs FFmpeg 4-8 shared libraries on the machine (apt install ffmpeg).
+    "torchcodec==0.10.*; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [project.optional-dependencies]

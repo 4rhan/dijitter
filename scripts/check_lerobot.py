@@ -28,6 +28,10 @@ from abc_to_lerobot import CAMERA_KEYS, REPO, load_episode, load_frames  # noqa:
 
 OUT = REPO / "outputs" / "check"
 PIXEL_TOL = 8.0  # mean abs error (0-255) allowed from H.264 re-encoding
+# A shifted frame still passes PIXEL_TOL (neighbouring frames look alike), so each checked frame must
+# also match its own source frame better than the source frames up to this many steps away.
+ALIGN_WINDOW = 3
+ALIGN_MARGIN = 0.5  # a neighbour must beat the true frame by this much (0-255) to count as a shift
 
 
 @dataclasses.dataclass
@@ -69,7 +73,17 @@ def main(args: Args) -> None:
         if state_err > 1e-6 or action_err > 1e-6:
             errs.append(f"state err {state_err:.2e}, action err {action_err:.2e}")
 
+        # Every camera's video segment must hold exactly one frame per row: the streaming encoder drops
+        # frames silently when it falls behind, which shifts all later images against state/action.
+        for cam, key in CAMERA_KEYS.items():
+            t0 = float(ds.meta.episodes[f"videos/{key}/from_timestamp"][k])
+            t1 = float(ds.meta.episodes[f"videos/{key}/to_timestamp"][k])
+            n_video = round((t1 - t0) * ds.meta.fps)
+            if n_video != T:
+                errs.append(f"{cam} video has {n_video} frames for {T} rows")
+
         pix_err = {}
+        shifts = {}
         grid_rows = None
         for t in np.linspace(0, n - 1, args.num_frames_checked).astype(int):
             item = ds[start + int(t)]
@@ -79,7 +93,13 @@ def main(args: Args) -> None:
             for cam, key in CAMERA_KEYS.items():
                 conv = (item[key].numpy().transpose(1, 2, 0) * 255).round().astype(np.uint8)  # (C,H,W) float -> HWC
                 src = src_frames[cam][t]
-                pix_err.setdefault(cam, []).append(float(np.abs(conv.astype(float) - src.astype(float)).mean()))
+                err = float(np.abs(conv.astype(float) - src.astype(float)).mean())
+                pix_err.setdefault(cam, []).append(err)
+                for d in range(-ALIGN_WINDOW, ALIGN_WINDOW + 1):
+                    if d and 0 <= t + d < n:
+                        if np.abs(conv.astype(float) - src_frames[cam][t + d].astype(float)).mean() < err - ALIGN_MARGIN:
+                            shifts.setdefault(cam, set()).add(int(t))
+                            break
                 src_row.append(src)
                 ds_row.append(conv)
             if grid_rows is None:  # save the first checked frame as a side-by-side picture
@@ -87,6 +107,8 @@ def main(args: Args) -> None:
         mean_pix = {cam: np.mean(v) for cam, v in pix_err.items()}
         if any(v > PIXEL_TOL for v in mean_pix.values()):
             errs.append(f"pixel err too high {mean_pix}")
+        for cam, ts in shifts.items():
+            errs.append(f"{cam} frames {sorted(ts)} match a neighbouring source frame better: images are shifted")
         imageio.imwrite(OUT / f"{args.repo_id}_ep{k}.png", grid_rows)
 
         status = "OK  " if not errs else "FAIL"
