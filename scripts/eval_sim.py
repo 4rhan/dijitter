@@ -16,6 +16,7 @@ Usage:
   python scripts/eval_sim.py --tag baseline --num-episodes 10            # against a server on localhost:8000
   python scripts/eval_sim.py --host <gpu-box-ip> --tag acg_s2 --num-episodes 50
   python scripts/eval_sim.py --replay-episode <abc episode dir> --tag mock_replay   # with mock server in replay mode
+  python scripts/eval_sim.py --viser --tag watch --num-episodes 3   # live 3D view at http://<host>:8080, real time
 """
 
 from __future__ import annotations
@@ -61,6 +62,54 @@ class Args:
     tag: str = "run"
     out: Path = REPO / "outputs" / "eval"
     save_video: bool = False
+    viser: bool = False
+    """Show the rollout live in a browser (viser, like abc's viz_policy.py), paced to real time."""
+    viser_port: int = 8080
+
+
+class LiveViewer:
+    """Browser 3D view of the env being stepped (same mjviser scene abc's viz_policy.py uses)."""
+
+    def __init__(self, port: int):
+        import asyncio
+        import math
+
+        import viser
+
+        self.server = viser.ViserServer(host="0.0.0.0", port=port)
+        self.status = self.server.gui.add_text("status", initial_value="starting", disabled=True)
+        self.model = None
+        self.scene = None
+        self.next_t = 0.0
+
+        @self.server.on_client_connect
+        async def _(client) -> None:
+            await asyncio.sleep(0.1)
+            client.camera.position = np.array([-0.42, 0.0, 1.66])
+            client.camera.look_at = np.array([0.45, 0.0, 0.87])
+            client.camera.up_direction = np.array([0.0, 0.0, 1.0])
+            client.camera.fov = math.radians(50.0)
+
+        print(f"live view: http://<this machine>:{self.server.get_port()}", flush=True)
+
+    def show(self, env, status: str) -> None:
+        from mjviser import ViserMujocoScene
+
+        env = getattr(env, "unwrapped", env)
+        if env.model is not self.model:  # abc_sim recompiles the MjModel on every reset
+            self.server.scene.reset()
+            self.scene = ViserMujocoScene(self.server, env.model, num_envs=1)
+            self.scene.camera_tracking_enabled = False
+            self.server.scene.remove_by_name("/fixed_bodies/world/table_plane")
+            self.model = env.model
+        self.scene.update_from_mjdata(env.data)
+        self.status.value = status
+        # Real time: one control step (timestep x decimation) of wall clock per action.
+        period = float(env.model.opt.timestep) * getattr(env, "_control_decimation", 1)
+        now = time.perf_counter()
+        if self.next_t > now:
+            time.sleep(self.next_t - now)
+        self.next_t = max(now, self.next_t) + period
 
 
 def make_env(args: Args):
@@ -112,8 +161,10 @@ def to_request(obs: dict, prompt: str, frame_index: int) -> dict:
     }
 
 
-def run_episode(env, replay, policy, args: Args, seed: int):
+def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer | None = None):
     obs = reset(env, replay, seed)
+    if viewer is not None:
+        viewer.show(env, f"seed {seed}: starting")
     chunks, chunk_frames, latency_ms, infer_ms = [], [], [], []
     executed, states, frames = [], [], []
     success, truncated, t = False, False, 0
@@ -132,6 +183,9 @@ def run_episode(env, replay, policy, args: Args, seed: int):
             step_obs, _, terminated, truncated, info = env.step(chunk[i], render_obs=last or args.save_video)
             executed.append(chunk[i])
             states.append(np.asarray(env.get_state(), dtype=np.float32))
+            if viewer is not None:
+                viewer.show(env, f"seed {seed}: step {t + 1}/{args.max_steps}  chunk {len(chunks)}"
+                            f"{'  SUCCESS' if info.get('task_success', False) else ''}")
             if args.save_video and step_obs is not None:
                 frames.append(np.concatenate([step_obs["images"][c].transpose(1, 2, 0) for c in CAMERAS], axis=1))
             if last and step_obs is not None:
@@ -167,12 +221,13 @@ def main(args: Args) -> None:
     policy = websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
     print(f"server metadata: {policy.get_server_metadata()}")
     env, replay = make_env(args)
+    viewer = LiveViewer(args.viser_port) if args.viser else None
 
     per_episode = []
     try:
         for k in range(args.num_episodes):
             seed = args.seed + k
-            r = run_episode(env, replay, policy, args, seed)
+            r = run_episode(env, replay, policy, args, seed, viewer)
             m = {
                 "episode": k,
                 "seed": seed,
