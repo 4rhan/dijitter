@@ -54,6 +54,19 @@ def default_layers(model) -> list[int]:
     return list(range(n // 2, n))
 
 
+def parse_layers(spec: str, model) -> list[int]:
+    """"half" (last half of the action expert, the default), "all", or an inclusive range like "15-17"."""
+    n = len(expert_layers(model))
+    if spec == "all":
+        return list(range(n))
+    if spec == "half":
+        return default_layers(model)
+    lo, hi = (int(x) for x in spec.split("-"))
+    if not 0 <= lo <= hi < n:
+        raise ValueError(f"layer range {spec!r} outside 0-{n - 1}")
+    return list(range(lo, hi + 1))
+
+
 def identity_actions(mask: torch.Tensor) -> torch.Tensor:
     """Additive mask (B, 1, S, prefix + S) with its last S x S (actions <-> actions) block made diagonal."""
     s = mask.shape[-2]

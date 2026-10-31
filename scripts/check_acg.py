@@ -44,16 +44,6 @@ class Args:
     seed: int = 0
 
 
-def parse_layers(spec: str, model) -> list[int]:
-    n = len(acg_pi05.expert_layers(model))
-    if spec == "all":
-        return list(range(n))
-    if spec == "half":
-        return acg_pi05.default_layers(model)
-    lo, hi = (int(x) for x in spec.split("-"))
-    return list(range(lo, hi + 1))
-
-
 def jerk(chunks: np.ndarray) -> float:
     return float(np.mean([chunk_metrics(c[None], executed_steps=len(c))["intra_jerk_rms"] for c in chunks]))
 
@@ -115,7 +105,7 @@ def main(args: Args) -> None:
 
     failures = []
     for spec in args.layer_sets:
-        layers = parse_layers(spec, model)
+        layers = acg_pi05.parse_layers(spec, model)
         print(f"\nperturbed layers {spec} = {layers[0]}..{layers[-1]} ({len(layers)} of {len(acg_pi05.expert_layers(model))})")
         print(f"{'scale':>6}{'calls':>7}{'ms':>7}{'max|acg-plain| rad':>21}{'mean|acg-plain|':>17}{'JerkRMS':>10}{'vs plain':>10}")
         for s in args.scales:

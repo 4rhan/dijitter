@@ -3,6 +3,7 @@
 #
 #   bash scripts/run_eval.sh                                   # baseline only, 50 episodes
 #   SCALES="none 1.5 2 3" bash scripts/run_eval.sh             # baseline + ACG sweep
+#   ACG_LAYERS=15-17 SCALES=1.25 bash scripts/run_eval.sh      # ACG on chosen action-expert layers
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/006000/pretrained_model N=10 bash scripts/run_eval.sh
 #   EVAL_ARGS="--save-video" NAME=videos N=10 bash scripts/run_eval.sh   # extra eval_sim.py flags
 #
@@ -16,6 +17,7 @@ NAME=${NAME:-$(basename "$(dirname "$(readlink -f "$CKPT")")")}  # step number o
 SCALES=${SCALES:-none}
 N=${N:-50}
 EVAL_ARGS=${EVAL_ARGS:-}
+ACG_LAYERS=${ACG_LAYERS:-half}  # action-expert layers ACG perturbs (see scripts/acg_pi05.py)
 PORT=${PORT:-8000}
 export HF_HUB_OFFLINE=1
 mkdir -p outputs/eval
@@ -25,7 +27,12 @@ cleanup() { [ -n "$SERVER" ] && kill "$SERVER" 2>/dev/null || true; }
 trap cleanup EXIT
 
 for s in $SCALES; do
-  if [ "$s" = none ]; then tag=${NAME}_baseline; acg=(); else tag=${NAME}_acg$s; acg=(--acg-scale "$s"); fi
+  if [ "$s" = none ]; then
+    tag=${NAME}_baseline; acg=()
+  else
+    tag=${NAME}_acg$s; acg=(--acg-scale "$s" --acg-layers "$ACG_LAYERS")
+    [ "$ACG_LAYERS" = half ] || tag=${tag}_L$ACG_LAYERS
+  fi
   if [ -f "outputs/eval/$tag/summary.json" ]; then echo "== $tag: already done"; continue; fi
   echo "== $tag: serving $CKPT ${acg[*]}"
   python scripts/serve_pi05.py --checkpoint "$CKPT" --port "$PORT" "${acg[@]}" > "outputs/eval/$tag.server.log" 2>&1 &

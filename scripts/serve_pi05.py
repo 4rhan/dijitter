@@ -12,6 +12,7 @@ hold the training stats, the camera renaming and (for RELATIVE=1 runs) the relat
 Usage:
   python scripts/serve_pi05.py --checkpoint outputs/train/pi05_inhand_lora/checkpoints/last/pretrained_model
   python scripts/serve_pi05.py --checkpoint ... --acg-scale 2.0
+  python scripts/serve_pi05.py --checkpoint ... --acg-scale 1.25 --acg-layers 15-17
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ class Args:
     """Parent directory of the training dataset (only its metadata is read)."""
     acg_scale: float | None = None
     """ACG guidance scale (scripts/acg_pi05.py); None = plain pi0.5."""
+    acg_layers: str = "half"
+    """Action-expert layers ACG perturbs: "half" (last half), "all", or a range like "15-17"."""
     num_steps: int | None = None
     """Flow-matching denoising steps (default: the checkpoint's, 10)."""
     seed: int = 0
@@ -76,9 +79,10 @@ class Pi05Server:
     def __init__(self, args: Args):
         self.policy, self.pre, self.post, self.cfg = load(args)
         if args.acg_scale is not None:
-            from acg_pi05 import set_acg_scale
+            import acg_pi05
 
-            set_acg_scale(self.policy, args.acg_scale)
+            layers = acg_pi05.parse_layers(args.acg_layers, acg_pi05.find_pi05_model(self.policy))
+            acg_pi05.set_acg_scale(self.policy, args.acg_scale, layers)
         torch.manual_seed(args.seed)
 
     @torch.inference_mode()
@@ -113,6 +117,7 @@ async def serve(args: Args) -> None:
         "backend": "lerobot_pi05",
         "checkpoint": str(args.checkpoint),
         "acg_scale": args.acg_scale,
+        "acg_layers": args.acg_layers if args.acg_scale is not None else None,
         "num_steps": server.cfg.num_inference_steps,
         "state_dim": 14,
     }
@@ -126,7 +131,7 @@ async def serve(args: Args) -> None:
             await websocket.send(packer.pack(action))
 
     async with ws_server.serve(handler, args.host, args.port, compression=None, max_size=None) as ws:
-        print(f"pi05 server (acg_scale={args.acg_scale}) on ws://{args.host}:{args.port}", flush=True)
+        print(f"pi05 server (acg_scale={args.acg_scale}, layers={args.acg_layers}) on ws://{args.host}:{args.port}", flush=True)
         await ws.serve_forever()
 
 
