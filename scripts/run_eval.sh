@@ -4,6 +4,7 @@
 #   bash scripts/run_eval.sh                                   # baseline only, 50 episodes
 #   SCALES="none 1.5 2 3" bash scripts/run_eval.sh             # baseline + ACG sweep
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/006000/pretrained_model N=10 bash scripts/run_eval.sh
+#   EVAL_ARGS="--save-video" NAME=videos N=10 bash scripts/run_eval.sh   # extra eval_sim.py flags
 #
 # For each setting: start scripts/serve_pi05.py, wait for it to load, run scripts/eval_sim.py, stop the
 # server. Results land in outputs/eval/<NAME>_<setting>/summary.json; the last lines compare them.
@@ -14,6 +15,7 @@ CKPT=${CKPT:-outputs/train/pi05_inhand_lora/checkpoints/last/pretrained_model}
 NAME=${NAME:-$(basename "$(dirname "$(readlink -f "$CKPT")")")}  # step number of the checkpoint
 SCALES=${SCALES:-none}
 N=${N:-50}
+EVAL_ARGS=${EVAL_ARGS:-}
 PORT=${PORT:-8000}
 export HF_HUB_OFFLINE=1
 mkdir -p outputs/eval
@@ -33,7 +35,8 @@ for s in $SCALES; do
     sleep 5
   done
   grep -E "warm-up|GPU memory" "outputs/eval/$tag.server.log"
-  python scripts/eval_sim.py --port "$PORT" --tag "$tag" --num-episodes "$N"
+  # shellcheck disable=SC2086  # EVAL_ARGS is a list of flags
+  python scripts/eval_sim.py --port "$PORT" --tag "$tag" --num-episodes "$N" $EVAL_ARGS
   kill "$SERVER"; wait "$SERVER" 2>/dev/null || true; SERVER=""
 done
 
