@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,10 @@ class Args:
     tag: str = "run"
     out: Path = REPO / "outputs" / "eval"
     save_video: bool = False
+    start_pose: str = "demo"
+    """Arm pose every episode starts from. "demo": the mean first state of the training demos (all start
+    from one sim pose, std ~0.002 rad). "init_q": abc_sim's default (the real robot's teleop pose),
+    which the demos never start from."""
     viser: bool = False
     """Show the rollout live in a browser (viser, like abc's viz_policy.py), paced to real time."""
     viser_port: int = 8080
@@ -112,8 +117,22 @@ class LiveViewer:
         self.next_t = max(now, self.next_t) + period
 
 
+def demo_start_state(src: Path = ABC / "cache" / "train_sim") -> np.ndarray:
+    """Mean first 14-D state of the recorded training episodes."""
+    first = [np.fromfile(p / "states_actions.bin", dtype=np.float64, count=28)[:14] for p in sorted(src.glob("episode_*"))]
+    if not first:
+        raise SystemExit(f"no episodes under {src} to take the demo start pose from")
+    return np.mean(first, axis=0)
+
+
 def make_env(args: Args):
     import abc_sim
+
+    if args.start_pose == "demo":
+        # abc_sim reads the reset arm pose (init_q) from DEPLOY_INIT_Q when it builds the env.
+        os.environ["DEPLOY_INIT_Q"] = json.dumps(demo_start_state().tolist())
+    elif args.start_pose != "init_q":
+        raise SystemExit(f"unknown --start-pose {args.start_pose!r}")
 
     spec = abc_sim.get_task_spec(args.task)
     kwargs = dict(
@@ -141,6 +160,9 @@ def make_env(args: Args):
 
 
 def reset(env, replay, seed: int):
+    # abc_sim carries the arm pose from the end of the previous episode into the next reset; drop it
+    # so every episode starts from the same pose, independent of how the previous one ended.
+    env.unwrapped.forget_arm_state()
     if replay is None:
         obs, _ = env.reset(seed=seed, randomize=True)
         return obs
