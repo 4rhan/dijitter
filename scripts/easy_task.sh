@@ -6,6 +6,7 @@
 #   bash scripts/easy_task.sh prepare         # build the 200-demo dataset and check it (CPU, ~15 min)
 #   bash scripts/easy_task.sh prepare_rel     # same dataset with relative-action stats, for RELATIVE=1
 #   bash scripts/easy_task.sh train           # overnight LoRA run; re-run to resume
+#   bash scripts/easy_task.sh overnight       # same, but first waits for the shared GPU (scripts/claim_gpu.sh)
 #   bash scripts/easy_task.sh eval            # evaluate the last checkpoint on 50 easy worlds
 #   CKPT=.../checkpoints/010000/pretrained_model bash scripts/easy_task.sh eval
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/008000/pretrained_model NAME=old8k REPO_ID=abc_inhand_transfer \
@@ -40,6 +41,9 @@ case "${1:-}" in
     export OUT=${OUT:-outputs/train/pi05_easy_lora}
     bash scripts/train_lora.sh
     ;;
+  overnight)
+    exec bash scripts/claim_gpu.sh bash scripts/easy_task.sh train
+    ;;
   eval)
     if [ "${RELATIVE:-0}" = 1 ]; then DATASET=${DATASET}_rel; fi
     export REPO_ID=${REPO_ID:-$DATASET}
@@ -49,7 +53,7 @@ case "${1:-}" in
     bash scripts/run_eval.sh
     ;;
   *)
-    sed -n 2,15p "$0"
+    sed -n 2,16p "$0"
     exit 1
     ;;
 esac
