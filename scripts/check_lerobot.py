@@ -24,7 +24,7 @@ import numpy as np
 import tyro
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from abc_to_lerobot import CAMERA_KEYS, REPO, load_episode, load_frames  # noqa: E402
+from abc_to_lerobot import CAMERA_KEYS, REPO, load_episode, load_frames, select_episodes  # noqa: E402
 
 OUT = REPO / "outputs" / "check"
 PIXEL_TOL = 8.0  # mean abs error (0-255) allowed from H.264 re-encoding
@@ -38,6 +38,9 @@ ALIGN_MARGIN = 0.5  # a neighbour must beat the true frame by this much (0-255) 
 class Args:
     repo_id: str = "abc_inhand_transfer_test"
     src: Path = REPO / "third_party" / "abc" / "cache" / "train_sim"
+    categories: tuple[str, ...] = ()
+    """The filters the dataset was converted with (scripts/abc_to_lerobot.py), so episodes line up."""
+    sides: tuple[str, ...] = ()
     out: Path = REPO / "data" / "lerobot"
     num_frames_checked: int = 5
     """Frames per episode compared against the source video (evenly spaced)."""
@@ -48,7 +51,7 @@ def main(args: Args) -> None:
 
     root = args.out.expanduser() / args.repo_id
     ds = LeRobotDataset(args.repo_id, root=root)
-    episodes = sorted(p.parent for p in args.src.expanduser().glob("episode_*/states_actions.bin"))
+    episodes = select_episodes(args.src, categories=args.categories, sides=args.sides)
     print(f"{args.repo_id}: {ds.meta.total_episodes} episodes, {ds.meta.total_frames} frames, fps={ds.meta.fps}")
     OUT.mkdir(parents=True, exist_ok=True)
 

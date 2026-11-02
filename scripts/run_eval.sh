@@ -5,6 +5,7 @@
 #   SCALES="none 1.5 2 3" bash scripts/run_eval.sh             # baseline + ACG sweep
 #   ACG_LAYERS=15-17 SCALES=1.25 bash scripts/run_eval.sh      # ACG on chosen action-expert layers
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/006000/pretrained_model N=10 bash scripts/run_eval.sh
+#   CKPT=... REPO_ID=abc_easy EVAL_ARGS="--categories can whisk --sides left" bash scripts/run_eval.sh
 #   EVAL_ARGS="--save-video" NAME=videos N=10 bash scripts/run_eval.sh   # extra eval_sim.py flags
 #
 # For each setting: start scripts/serve_pi05.py, wait for it to load, run scripts/eval_sim.py, stop the
@@ -19,6 +20,7 @@ N=${N:-50}
 EVAL_ARGS=${EVAL_ARGS:-}
 ACG_LAYERS=${ACG_LAYERS:-half}  # action-expert layers ACG perturbs (see scripts/acg_pi05.py)
 PORT=${PORT:-8000}
+REPO_ID=${REPO_ID:-abc_inhand_transfer}  # the dataset the checkpoint was trained on
 export HF_HUB_OFFLINE=1
 mkdir -p outputs/eval
 
@@ -35,7 +37,7 @@ for s in $SCALES; do
   fi
   if [ -f "outputs/eval/$tag/summary.json" ]; then echo "== $tag: already done"; continue; fi
   echo "== $tag: serving $CKPT ${acg[*]}"
-  python scripts/serve_pi05.py --checkpoint "$CKPT" --port "$PORT" "${acg[@]}" > "outputs/eval/$tag.server.log" 2>&1 &
+  python scripts/serve_pi05.py --checkpoint "$CKPT" --repo-id "$REPO_ID" --port "$PORT" "${acg[@]}" > "outputs/eval/$tag.server.log" 2>&1 &
   SERVER=$!
   until grep -q "pi05 server" "outputs/eval/$tag.server.log"; do
     kill -0 "$SERVER" 2>/dev/null || { echo "server died:"; tail -20 "outputs/eval/$tag.server.log"; exit 1; }

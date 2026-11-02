@@ -17,6 +17,7 @@ Usage:
   python scripts/eval_sim.py --host <gpu-box-ip> --tag acg_s2 --num-episodes 50
   python scripts/eval_sim.py --replay-episode <abc episode dir> --tag mock_replay   # with mock server in replay mode
   python scripts/eval_sim.py --viser --tag watch --num-episodes 3   # live 3D view at http://<host>:8080, real time
+  python scripts/eval_sim.py --categories can whisk --sides left --tag easy   # only worlds with these objects/sides
 """
 
 from __future__ import annotations
@@ -51,7 +52,12 @@ class Args:
     prompt: str = TRAIN_PROMPT
     num_episodes: int = 10
     seed: int = 0
-    """Episode k uses seed + k, so runs with the same seed see the same worlds."""
+    """Episodes use seed, seed + 1, ... (skipping worlds the filters reject), so runs with the same
+    seed and filters see the same worlds."""
+    categories: tuple[str, ...] = ()
+    """Only run worlds with these objects (empty = all). Must match what the policy was trained on."""
+    sides: tuple[str, ...] = ()
+    """Only run worlds whose object starts on these sides, left and/or right (empty = both)."""
     execute_steps: int = 25
     """Actions executed from each predicted chunk before re-querying (π0.5 predicts 50)."""
     max_steps: int = 1200
@@ -183,6 +189,25 @@ def to_request(obs: dict, prompt: str, frame_index: int) -> dict:
     }
 
 
+def select_seeds(env, args: Args) -> list[int]:
+    """The first --num-episodes seeds whose world passes --categories/--sides. The task randomizer is
+    driven by the seed alone, so abc_sim stays unmodified and its seed -> world mapping unchanged."""
+    if not (args.categories or args.sides):
+        return [args.seed + k for k in range(args.num_episodes)]
+    seeds, seed = [], args.seed
+    while len(seeds) < args.num_episodes:
+        if seed > args.seed + 1000 * args.num_episodes:
+            raise SystemExit(f"no worlds match categories={args.categories} sides={args.sides}")
+        env.reset(seed=seed, randomize=True)
+        world = env.unwrapped
+        if (not args.categories or world._inhand_category in args.categories) and (
+            not args.sides or world._inhand_side in args.sides
+        ):
+            seeds.append(seed)
+        seed += 1
+    return seeds
+
+
 def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer | None = None):
     obs = reset(env, replay, seed)
     if viewer is not None:
@@ -247,8 +272,8 @@ def main(args: Args) -> None:
 
     per_episode = []
     try:
-        for k in range(args.num_episodes):
-            seed = args.seed + k
+        seeds = [args.seed + k for k in range(args.num_episodes)] if replay else select_seeds(env, args)
+        for k, seed in enumerate(seeds):
             r = run_episode(env, replay, policy, args, seed, viewer)
             m = {
                 "episode": k,

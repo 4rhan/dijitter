@@ -12,6 +12,7 @@ Actions stay absolute; the openpi config converts arm joints to deltas itself.
 Usage:
   python scripts/abc_to_lerobot.py --repo-id abc_inhand_transfer --max-episodes 20
   python scripts/abc_to_lerobot.py --max-episodes 100 --workers 8   # shards in parallel, then merged
+  python scripts/abc_to_lerobot.py --repo-id abc_easy --categories can whisk --sides left --max-episodes 200
 
 LeRobot's writer spends ~30 s of single-threaded Python per episode (per-frame image stats in the
 encoder threads), so --workers converts contiguous shards in separate processes and merges them in
@@ -61,6 +62,10 @@ class Args:
     """Parent directory; the dataset is written to <out>/<repo_id>."""
     task: str = ""
     """Only convert episodes whose task_name matches (empty = all)."""
+    categories: tuple[str, ...] = ()
+    """Only convert episodes with these objects (randomization.json's category; empty = all)."""
+    sides: tuple[str, ...] = ()
+    """Only convert episodes whose object starts on these sides, left and/or right (empty = both)."""
     max_episodes: int | None = None
     """Convert only the first N episodes (for a quick check)."""
     overwrite: bool = False
@@ -69,6 +74,27 @@ class Args:
     streaming encoding on the GPU box."""
     workers: int = 1
     """Parallel converter processes (each takes a contiguous shard of the episodes)."""
+
+
+def select_episodes(
+    src: Path,
+    task: str = "",
+    categories: tuple[str, ...] = (),
+    sides: tuple[str, ...] = (),
+    max_episodes: int | None = None,
+) -> list[Path]:
+    """Episode directories under `src`, in sorted order, filtered by what each one recorded."""
+    episodes = sorted(p.parent for p in src.expanduser().glob("episode_*/states_actions.bin"))
+    if task:
+        episodes = [e for e in episodes if json.loads((e / "episode_metadata.json").read_text())["task_name"] == task]
+    if categories or sides:
+        picked = []
+        for e in episodes:
+            world = json.loads((e / "randomization.json").read_text())["metadata"]
+            if (not categories or world["category"] in categories) and (not sides or world["side"] in sides):
+                picked.append(e)
+        episodes = picked
+    return episodes if max_episodes is None else episodes[:max_episodes]
 
 
 def load_episode(ep: Path) -> tuple[dict, np.ndarray, np.ndarray]:
@@ -164,11 +190,7 @@ def main(args: Args) -> None:
             raise SystemExit(f"{root} exists; pass --overwrite to replace it")
         shutil.rmtree(root)
 
-    episodes = sorted(p.parent for p in src.glob("episode_*/states_actions.bin"))
-    if args.task:
-        episodes = [e for e in episodes if json.loads((e / "episode_metadata.json").read_text())["task_name"] == args.task]
-    if args.max_episodes is not None:
-        episodes = episodes[: args.max_episodes]
+    episodes = select_episodes(src, args.task, args.categories, args.sides, args.max_episodes)
     if not episodes:
         raise SystemExit(f"no episodes found under {src}")
     workers = max(1, min(args.workers, len(episodes)))

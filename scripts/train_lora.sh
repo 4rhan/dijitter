@@ -4,6 +4,7 @@
 #   bash scripts/train_lora.sh                      # 10k steps -> outputs/train/pi05_inhand_lora
 #   STEPS=20 OUT=outputs/train/dry bash scripts/train_lora.sh   # quick dry run
 #   RELATIVE=1 bash scripts/train_lora.sh           # arm joints as deltas to the state (openpi YAM recipe)
+#   LORA_SCOPE=expert bash scripts/train_lora.sh    # LoRA on the action expert only (7M params, not 27M)
 #
 # Re-running with the same OUT resumes from its last checkpoint (also to extend a finished run with a
 # larger STEPS). A run that died before its first checkpoint is moved aside and started fresh.
@@ -13,8 +14,12 @@
 #     the action/time projections (openpi's pi05 LoRA recipe). LeRobot's default only adapts the
 #     expert's q/v (1.3M params); this is 27M. 12.3 GB GPU, ~1.9 s/step at batch 8 on a 4090.
 #   - gradient checkpointing: batch 8 OOMs on 24 GB without it.
+#   - LORA_SCOPE=expert leaves the PaliGemma LM frozen. Less to backpropagate, fewer params to adapt.
+#   - the learning rate decays over the whole run (LeRobot's default stops at 30k and stays at the floor).
 #   - rename_map: our camera keys -> the ones pi05_base was trained with (same as test_pi05.py).
 #   - pi05_base is read from the shared HF cache and never modified; checkpoints are adapters only.
+#     BASE picks the copy: by default a cached snapshot that is complete, since the cache's
+#     refs/main can point at a snapshot holding only the weights, which fails offline.
 #   - RELATIVE=1: arm-joint actions relative to the current state, grippers absolute, like openpi's
 #     pi05_yam_lora_inhand. Needs the <REPO_ID>_rel dataset (action stats recomputed on relative
 #     chunks, see scripts/cloud/setup_node.sh); the checkpoint's processors convert back to absolute.
@@ -24,15 +29,24 @@ cd "$(dirname "$0")/.."
 STEPS=${STEPS:-10000}
 OUT=${OUT:-outputs/train/pi05_inhand_lora}
 RELATIVE=${RELATIVE:-0}
-if [ "$RELATIVE" = 1 ]; then
-  REPO_ID=${REPO_ID:-abc_inhand_transfer_rel}
-else
-  REPO_ID=${REPO_ID:-abc_inhand_transfer}
-fi
+REPO_ID=${REPO_ID:-abc_inhand_transfer}
+[ "$RELATIVE" = 1 ] && REPO_ID=${REPO_ID}_rel
 BATCH=${BATCH:-8}
 NUM_WORKERS=${NUM_WORKERS:-4}
 GRAD_CKPT=${GRAD_CKPT:-true}
 SAVE_FREQ=${SAVE_FREQ:-2000}
+LORA_SCOPE=${LORA_SCOPE:-all}
+case "$LORA_SCOPE" in
+  all) LORA_BLOCKS="language_model|gemma_expert" ;;
+  expert) LORA_BLOCKS="gemma_expert" ;;
+  *) echo "LORA_SCOPE must be all or expert, not $LORA_SCOPE"; exit 1 ;;
+esac
+if [ -z "${BASE:-}" ]; then
+  BASE=lerobot/pi05_base
+  for snapshot in "${HF_HUB_CACHE:-$HOME/.cache/huggingface/hub}"/models--lerobot--pi05_base/snapshots/*; do
+    if [ -f "$snapshot/config.json" ] && [ -f "$snapshot/model.safetensors" ]; then BASE=$snapshot; fi
+  done
+fi
 
 export HF_HUB_OFFLINE=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
@@ -53,16 +67,17 @@ if [ -d "$OUT" ]; then
 fi
 
 lerobot-train \
-  --policy.path=lerobot/pi05_base \
+  --policy.path="$BASE" \
   --policy.dtype=bfloat16 \
   --policy.device=cuda \
   --policy.push_to_hub=false \
   --policy.gradient_checkpointing="$GRAD_CKPT" \
   --policy.use_relative_actions="$( [ "$RELATIVE" = 1 ] && echo true || echo false )" \
+  --policy.scheduler_decay_steps="$STEPS" \
   --peft.method_type=LORA \
   --peft.r=16 \
   --peft.lora_alpha=16 \
-  "--peft.target_modules=(.*\.(language_model|gemma_expert)\..*\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)|model\.(action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out))" \
+  "--peft.target_modules=(.*\.($LORA_BLOCKS)\..*\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)|model\.(action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out))" \
   --dataset.repo_id="$REPO_ID" \
   --dataset.root="data/lerobot/$REPO_ID" \
   --rename_map='{"observation.images.top_rgb": "observation.images.base_0_rgb", "observation.images.left_rgb": "observation.images.left_wrist_0_rgb", "observation.images.right_rgb": "observation.images.right_wrist_0_rgb"}' \
