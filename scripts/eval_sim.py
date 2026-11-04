@@ -282,7 +282,7 @@ def main(args: Args) -> None:
                 "steps": r["steps"],
                 "latency_ms_mean": float(r["latency_ms"].mean()),
                 "infer_ms_mean": float(np.nanmean(r["infer_ms"])) if np.isfinite(r["infer_ms"]).any() else None,
-                **trajectory_metrics(r["executed"]),
+                **trajectory_metrics(r["executed"], r["states"]),
                 **chunk_metrics(r["chunks"], args.execute_steps),
             }
             per_episode.append(m)
