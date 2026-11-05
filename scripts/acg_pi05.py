@@ -17,7 +17,7 @@ Denoising steps: guidance pushes noise out faster than Euler at 10 steps can fol
 keeps a residual of the initial noise (correlation with it -0.81 at lambda 1, last half, on the 15k
 checkpoint), and that is the extra jerk. On the same frames, intra-chunk jerk against plain pi0.5 at the
 same step count, lambda 1, layers 15-17: 2.88x at 10 steps, 2.10x at 16, 1.14x at 32, 0.62x at 64. Use
-serve_pi05's --num_steps or run_eval's NUM_STEPS. Each step costs two model passes.
+serve_pi05's --num-steps or run_eval's NUM_STEPS. Each step costs two model passes.
 
 Images, text and state: GR00T perturbs pure self-attention blocks (encoder_hidden_states=None) and takes
 vision and language through separate cross-attention blocks that ACG never touches. pi0.5 merges prefix
