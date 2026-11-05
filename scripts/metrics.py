@@ -9,7 +9,8 @@ As in the paper: both are averaged across all motors (14 here, grippers included
 first 64 timesteps, because later trajectories diverge depending on success or failure. Note that
 the YAM gripper values run 0-1 rather than in radians.
 
-chunk_metrics (intra-chunk and chunk-switch numbers) is not from the paper: it is a diagnostic of ours.
+chunk_metrics and executed_jerk_split (intra-chunk and chunk-switch numbers) are not from the paper:
+they are diagnostics of ours.
 
 Usage:
   python scripts/metrics.py --max-episodes 200          # the training demos
@@ -76,6 +77,27 @@ def chunk_metrics(
     return out
 
 
+def executed_jerk_split(executed: np.ndarray, chunk_frames: np.ndarray, fps: float = FPS) -> dict[str, float]:
+    """Our own diagnostic: where the jerk of the executed arm actions is, over the whole episode.
+
+    A jerk sample uses four consecutive actions, so it touches a chunk switch at frame s if it starts in
+    s - 3 .. s - 1. Each value is an RMS over samples and arm joints; the *_energy values are sums of
+    squares, for pooling across episodes.
+    """
+    jerk = np.diff(executed[..., ARM_INDICES], n=3, axis=0) * fps**3
+    at_switch = np.zeros(len(jerk), dtype=bool)
+    for s in chunk_frames[1:]:
+        at_switch[max(0, int(s) - 3) : max(0, min(len(jerk), int(s)))] = True
+    inside, switch = jerk[~at_switch], jerk[at_switch]
+    return {
+        "exec_jerk_rms": float(np.sqrt((jerk**2).mean())),
+        "exec_jerk_inside": float(np.sqrt((inside**2).mean())) if inside.size else float("nan"),
+        "exec_jerk_switch": float(np.sqrt((switch**2).mean())) if switch.size else float("nan"),
+        "inside_energy": float((inside**2).sum()),
+        "switch_energy": float((switch**2).sum()),
+    }
+
+
 @dataclasses.dataclass
 class Args:
     src: Path = REPO / "third_party" / "abc" / "cache" / "train_sim"
@@ -87,15 +109,21 @@ class Args:
 
 
 def eval_table(root: Path) -> None:
-    print(f"{'run':<30}{'episodes':>9}{'ATV':>10}{'JerkRMS':>10}")
+    print(f"{'run':<30}{'episodes':>9}{'ATV':>10}{'JerkRMS':>10}{'exec jerk':>11}{'inside':>9}{'at switch':>11}{'switch %':>10}")
     for run in sorted(p for p in root.iterdir() if p.is_dir()):
         rows = []
         for path in run.glob("episode_*.npz"):
             with np.load(path) as ep:
-                rows.append(trajectory_metrics(ep["executed"], ep["states"]))
+                rows.append({**trajectory_metrics(ep["executed"], ep["states"]),
+                             **executed_jerk_split(ep["executed"], ep["chunk_frames"])})
         if rows:
+            inside, switch = (sum(r[k] for r in rows) for k in ("inside_energy", "switch_energy"))
             print(f"{run.name:<30}{len(rows):>9}{np.mean([r['atv'] for r in rows]):>10.5f}"
-                  f"{np.mean([r['jerk_rms'] for r in rows]):>10.1f}")
+                  f"{np.mean([r['jerk_rms'] for r in rows]):>10.1f}"
+                  f"{np.mean([r['exec_jerk_rms'] for r in rows]):>11.1f}"
+                  f"{np.mean([r['exec_jerk_inside'] for r in rows]):>9.1f}"
+                  f"{np.mean([r['exec_jerk_switch'] for r in rows]):>11.1f}"
+                  f"{100 * switch / (inside + switch):>10.1f}")
 
 
 def main(args: Args) -> None:

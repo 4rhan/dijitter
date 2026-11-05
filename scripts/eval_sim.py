@@ -34,7 +34,7 @@ import tyro
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from abc_to_lerobot import REPO  # noqa: E402
-from metrics import chunk_metrics, trajectory_metrics  # noqa: E402
+from metrics import chunk_metrics, executed_jerk_split, trajectory_metrics  # noqa: E402
 
 ABC = REPO / "third_party" / "abc"
 sys.path.insert(0, str(ABC))
@@ -60,6 +60,9 @@ class Args:
     """Only run worlds whose object starts on these sides, left and/or right (empty = both)."""
     execute_steps: int = 25
     """Actions executed from each predicted chunk before re-querying (π0.5 predicts 50)."""
+    blend_steps: int = 0
+    """Crossfade from the previous chunk's plan to the new chunk over this many actions after a switch
+    (0 = off, at most execute_steps). Needs no extra inference."""
     max_steps: int = 1200
     """Per-episode cap on executed actions (30 Hz; demos are ~400-550 steps)."""
     camera_height: int = 168
@@ -208,6 +211,15 @@ def select_seeds(env, args: Args) -> list[int]:
     return seeds
 
 
+def blended_action(chunk: np.ndarray, i: int, prev: np.ndarray | None, used: int, blend_steps: int) -> np.ndarray:
+    """Action i of `chunk`, smoothstep-faded in from what `prev` planned for this moment (its action used + i)."""
+    if prev is None or i >= blend_steps or used + i >= len(prev):
+        return chunk[i]
+    x = (i + 1) / (blend_steps + 1)
+    w = x * x * (3 - 2 * x)
+    return (1 - w) * prev[used + i] + w * chunk[i]
+
+
 def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer | None = None):
     obs = reset(env, replay, seed)
     if viewer is not None:
@@ -215,6 +227,7 @@ def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer |
     chunks, chunk_frames, latency_ms, infer_ms = [], [], [], []
     executed, states, frames = [], [], []
     success, truncated, t = False, False, 0
+    prev_chunk, prev_used = None, 0
     while t < args.max_steps and not success:
         t0 = time.perf_counter()
         resp = policy.infer(to_request(obs, args.prompt, t))
@@ -227,8 +240,9 @@ def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer |
         n = min(args.execute_steps, len(chunk), args.max_steps - t)
         for i in range(n):
             last = i == n - 1
-            step_obs, _, terminated, truncated, info = env.step(chunk[i], render_obs=last or args.save_video)
-            executed.append(chunk[i])
+            action = blended_action(chunk, i, prev_chunk, prev_used, args.blend_steps)
+            step_obs, _, terminated, truncated, info = env.step(action, render_obs=last or args.save_video)
+            executed.append(action)
             states.append(np.asarray(env.get_state(), dtype=np.float32))
             if viewer is not None:
                 viewer.show(env, f"seed {seed}: step {t + 1}/{args.max_steps}  chunk {len(chunks)}"
@@ -246,6 +260,7 @@ def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer |
                 break
         if truncated:
             break
+        prev_chunk, prev_used = chunk, n
 
     return {
         "success": bool(success),
@@ -262,6 +277,9 @@ def run_episode(env, replay, policy, args: Args, seed: int, viewer: LiveViewer |
 
 def main(args: Args) -> None:
     from openpi_client import websocket_client_policy
+
+    if args.blend_steps > args.execute_steps:
+        raise SystemExit(f"--blend-steps {args.blend_steps} is more than --execute-steps {args.execute_steps}")
 
     out = args.out / args.tag
     out.mkdir(parents=True, exist_ok=True)
@@ -284,6 +302,7 @@ def main(args: Args) -> None:
                 "infer_ms_mean": float(np.nanmean(r["infer_ms"])) if np.isfinite(r["infer_ms"]).any() else None,
                 **trajectory_metrics(r["executed"], r["states"]),
                 **chunk_metrics(r["chunks"], args.execute_steps),
+                **executed_jerk_split(r["executed"], r["chunk_frames"]),
             }
             per_episode.append(m)
             np.savez_compressed(out / f"episode_{k}.npz", **{key: r[key] for key in
@@ -298,7 +317,8 @@ def main(args: Args) -> None:
     finally:
         env.close()
 
-    keys = ("latency_ms_mean", "jerk_rms", "atv", "intra_jerk_rms", "intra_atv", "switch_jump")
+    keys = ("latency_ms_mean", "jerk_rms", "atv", "intra_jerk_rms", "intra_atv", "switch_jump",
+            "exec_jerk_rms", "exec_jerk_inside", "exec_jerk_switch")
     summary = {
         "tag": args.tag,
         "episodes": len(per_episode),
