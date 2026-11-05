@@ -76,8 +76,8 @@ dataset_rel() {
     "--operation.relative_exclude_joints=['gripper']"
 }
 
-# pi05_base loads, predicts, and ACG at scale 1.0 reproduces the baseline exactly (exits non-zero if not).
-smoke() { HF_HUB_OFFLINE=1 python scripts/test_pi05.py --repo-id "$DATASET" --acg-scales 1.0 2.0 3.0; }
+# pi05_base loads, predicts, and ACG at scale 0 reproduces the baseline exactly (exits non-zero if not).
+smoke() { HF_HUB_OFFLINE=1 python scripts/test_pi05.py --repo-id "$DATASET" --acg-scales 0.0 1.0 3.0; }
 
 step uv install_uv
 export PATH=$HOME/.local/bin:$PATH

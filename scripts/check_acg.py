@@ -1,10 +1,10 @@
 """Check the ACG patch (scripts/acg_pi05.py) on a trained checkpoint, on dataset frames, same noise per frame.
 
-  1. scale 1.0 reproduces plain pi0.5 exactly (and skips the second pass).
-  2. scale 0.0 is the pure "incoherent" model (v_inc): it should be jerkier than plain pi0.5.
-  3. scales > 1 steer away from it: chunks should get smoother, without moving far from plain pi0.5.
+  1. scale 0 reproduces plain pi0.5 exactly (and skips the second pass).
+  2. scale -1 is the pure incoherent model (v_ic): it should be jerkier than plain pi0.5.
+  3. scales > 0 steer away from it: chunks should get smoother, without moving far from plain pi0.5.
   4. mechanics: two model calls per denoising step; in the incoherent pass, exactly the chosen layers
-     get a mask whose actions<->actions block is the identity, with the prefix columns untouched.
+     get a mask whose attention map is the identity, with the whole prefix masked out.
 
 Layer sets: "half" (default, last half of the action expert), "all", or a range like "12-17".
 
@@ -37,7 +37,7 @@ class Args:
     checkpoint: Path
     repo_id: str = "abc_inhand_transfer"
     root: Path = REPO / "data" / "lerobot"
-    scales: tuple[float, ...] = (0.0, 1.0, 1.5, 2.0, 3.0)
+    scales: tuple[float, ...] = (-1.0, 0.0, 1.0, 2.0, 3.0)
     layer_sets: tuple[str, ...] = ("half", "all")
     episodes: tuple[int, ...] = (0, 10, 20, 30)
     frames_per_episode: int = 4
@@ -73,14 +73,14 @@ def main(args: Args) -> None:
 
     type(model).denoise_step = counting_denoise
     rewrites = []
-    plain_identity = acg_pi05.identity_actions
+    plain_identity = acg_pi05.identity_attention
 
     def recording_identity(mask):
         out = plain_identity(mask)
         rewrites.append((mask.detach(), out.detach()))
         return out
 
-    acg_pi05.identity_actions = recording_identity
+    acg_pi05.identity_attention = recording_identity
 
     @torch.inference_mode()
     def predict(frame, seed):
@@ -113,28 +113,29 @@ def main(args: Args) -> None:
             d = np.abs(out - base)
             j = jerk(out)
             print(f"{s:>6g}{n_calls:>7.0f}{ms:>7.0f}{d.max():>21.2e}{d.mean():>17.2e}{j:>10.1f}{j / base_jerk:>9.2f}x")
-            expected_calls = steps if s == 1.0 else 2 * steps
+            expected_calls = steps if s == 0.0 else 2 * steps
             if n_calls != expected_calls:
                 failures.append(f"{spec} scale {s:g}: {n_calls:.0f} model calls per chunk, expected {expected_calls}")
-            if s == 1.0 and d.max() > 0:
-                failures.append(f"{spec} scale 1.0 differs from plain by {d.max():.2e}")
-            if s != 1.0:
+            if s == 0.0 and d.max() > 0:
+                failures.append(f"{spec} scale 0 differs from plain by {d.max():.2e}")
+            if s != 0.0:
                 per_chunk = len(rewrites) / len(frames)
                 if per_chunk != steps * len(layers):
                     failures.append(f"{spec} scale {s:g}: {per_chunk:.0f} mask rewrites per chunk, expected {steps * len(layers)}")
                 before, after = rewrites[0]
                 n = before.shape[-2]
                 eye = torch.eye(n, dtype=torch.bool, device=after.device)
-                block_ok = bool(torch.equal(after[0, 0, :, -n:] == 0, eye & (before[0, 0, :, -n:] == 0)))
-                prefix_ok = bool(torch.equal(after[..., :-n], before[..., :-n]))
+                attn_map = torch.softmax(after[0, 0].float(), dim=-1)
+                block_ok = bool(torch.equal(attn_map[:, -n:], eye.float()))
+                prefix_ok = bool((attn_map[:, :-n] == 0).all())
                 if not (block_ok and prefix_ok):
-                    failures.append(f"{spec} scale {s:g}: mask block identity {block_ok}, prefix untouched {prefix_ok}")
+                    failures.append(f"{spec} scale {s:g}: attention map identity {block_ok}, prefix masked {prefix_ok}")
 
     acg_pi05.identity_actions = plain_identity
     acg_pi05.set_acg_scale(policy, None)
     if failures:
         raise SystemExit("ACG check FAILED:\n  " + "\n  ".join(failures))
-    print("\nACG mechanics check passed (calls, identity at 1.0, per-layer mask rewrite)")
+    print("\nACG mechanics check passed (calls, identity at scale 0, identity attention map per layer)")
 
 
 if __name__ == "__main__":

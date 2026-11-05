@@ -87,10 +87,11 @@ python scripts/eval_sim.py --replay-episode third_party/abc/cache/val_sim/<episo
 
 ## ACG
 
-`Pi0.sample_actions(..., acg_scale=s)` runs a second denoising pass per step in which action tokens can't
-attend to each other (each still sees image, text and state, plus itself), then uses
-`v = v + (s - 1) * (v - v_incoherent)`. `acg_scale=None` (the default) is the unchanged baseline. On the server, pass `--acg-scale`.
-At present every layer is perturbed; the paper perturbs only some middle layers (that's a TODO).
+`scripts/acg_pi05.py` follows the paper's Algorithm 1 on LeRobot π0.5. Each denoising step runs a second pass in which
+the chosen layers use an identity attention map, so each action token attends only to itself, then uses
+`v = (1 + λ) * v - λ * v_incoherent`. On the server, `--acg-scale` is λ: 0 reproduces the baseline and the paper's default
+is 3. Eval runs named `*_acg<s>` predate this and used a different variant (actions still saw the prefix, λ = s - 1);
+new runs are named `*_lambda<λ>`. By default the last half of the action expert's layers are perturbed.
 
 ## GPU box: LoRA fine-tune π0.5
 

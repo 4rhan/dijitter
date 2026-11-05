@@ -2,8 +2,8 @@
 # Closed-loop sim eval of one checkpoint: plain pi0.5 first, then each ACG scale, same seeds (same worlds).
 #
 #   bash scripts/run_eval.sh                                   # baseline only, 50 episodes
-#   SCALES="none 1.5 2 3" bash scripts/run_eval.sh             # baseline + ACG sweep
-#   ACG_LAYERS=15-17 SCALES=1.25 bash scripts/run_eval.sh      # ACG on chosen action-expert layers
+#   SCALES="none 1 2 3" bash scripts/run_eval.sh             # baseline + ACG sweep
+#   ACG_LAYERS=15-17 SCALES=0.25 bash scripts/run_eval.sh      # ACG on chosen action-expert layers
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/006000/pretrained_model N=10 bash scripts/run_eval.sh
 #   CKPT=... REPO_ID=abc_easy EVAL_ARGS="--categories can whisk --sides left" bash scripts/run_eval.sh
 #   EVAL_ARGS="--save-video" NAME=videos N=10 bash scripts/run_eval.sh   # extra eval_sim.py flags
@@ -32,7 +32,7 @@ for s in $SCALES; do
   if [ "$s" = none ]; then
     tag=${NAME}_baseline; acg=()
   else
-    tag=${NAME}_acg$s; acg=(--acg-scale "$s" --acg-layers "$ACG_LAYERS")
+    tag=${NAME}_lambda$s; acg=(--acg-scale "$s" --acg-layers "$ACG_LAYERS")
     [ "$ACG_LAYERS" = half ] || tag=${tag}_L$ACG_LAYERS
   fi
   if [ -f "outputs/eval/$tag/summary.json" ]; then echo "== $tag: already done"; continue; fi

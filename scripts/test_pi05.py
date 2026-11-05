@@ -13,7 +13,7 @@ and give lower intra-chunk jerk, at about twice the latency.
 
 Usage:
   python scripts/test_pi05.py --repo-id abc_inhand_transfer
-  python scripts/test_pi05.py --acg-scales 1.0 2.0 3.0
+  python scripts/test_pi05.py --acg-scales 0.0 1.0 3.0
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class Args:
     num_frames: int = 5
     """Frames to predict on (spread across episode 0)."""
     acg_scales: tuple[float, ...] = ()
-    """ACG scales to compare against the baseline (e.g. 1.0 2.0 3.0)."""
+    """ACG scales (the paper's lambda) to compare against the baseline (e.g. 0.0 1.0 3.0)."""
     dtype: str = "bfloat16"
     device: str = "cuda"
     seed: int = 0
@@ -129,9 +129,9 @@ def main(args: Args) -> None:
             preds = run(policy, pre, post, frames, demos, starts, args, label=f"acg {scale:g}", verbose=False)
             diff = max(np.abs(p - b).max() for p, b in zip(preds, baseline, strict=True))
             print(f"    max |acg - baseline| = {diff:.2e} rad")
-            if scale == 1.0 and diff > 1e-4:
-                failures.append(f"scale 1.0 should reproduce the baseline, differs by {diff:.2e}")
-            if scale != 1.0 and diff == 0.0:
+            if scale == 0.0 and diff > 1e-4:
+                failures.append(f"scale 0 should reproduce the baseline, differs by {diff:.2e}")
+            if scale != 0.0 and diff == 0.0:
                 failures.append(f"scale {scale:g} has no effect: the incoherent pass is not perturbing the model")
         set_acg_scale(policy, None)
         if failures:

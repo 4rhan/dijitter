@@ -1,29 +1,36 @@
 """Action Coherence Guidance (ACG) for LeRobot pi0.5, applied to a loaded policy without forking LeRobot.
 
-ACG (arXiv 2510.22201): at every flow-matching denoising step, run the model twice:
-  v      normal pass
-  v_inc  "incoherent" pass: in a subset of the action expert's layers, each action token attends to
-         the prefix (images, text, state) and to itself only, so those layers cannot coordinate the
-         action tokens with each other
-and steer away from the incoherent prediction:
-  v_acg = v + (scale - 1) * (v - v_inc)
-scale = 1.0 reproduces the normal policy exactly; scale > 1 pushes toward temporally coherent chunks.
+Follows the paper (arXiv 2510.22201), Algorithm 1. At every flow-matching denoising step, run the model twice:
+  v     normal pass
+  v_ic  incoherent pass: in a subset of the action expert's layers the attention map is the identity,
+        so each action token attends only to itself and the attention output is its own V (Eq. 11)
+and steer away from the incoherent prediction (Eq. 8):
+  v_acg = (1 + scale) * v - scale * v_ic
+scale is the paper's lambda: 0 reproduces the normal policy exactly, the paper's default is 3.
 
-Which layers: the reference implementation (third_party/ACG, GR00T N1) replaces self-attention with
-identity attention in 3 of its 6 self-attention layers, the last half (blocks 7, 9, 11). Perturbing
-every layer is far too strong: v_inc stops resembling a policy at all (on our checkpoint its chunks
-were ~100x jerkier than plain pi0.5), and steering away from it adds noise instead of coherence. So
-by default we perturb the last half of pi0.5's 18 action-expert layers; `layers` picks others.
+The authors' code (third_party/ACG) computes v + (scale - 1) * (v - v_ic) instead, so its scale s is
+lambda = s - 1. This file follows the paper, so runs made before this change have lambda = old scale - 1.
+
+pi0.5 integrates from noise at t=1 to actions at t=0 with v = noise - actions, the reverse of the
+paper's t=0 to 1 with v = actions - noise. Eq. 8 is linear in v, so the guided sample is unchanged.
+
+pi0.5 merges prefix and action attention into one operation, where GR00T has separate cross-attention
+blocks. An identity map therefore also cuts images, text and state out of the perturbed layers; the
+unperturbed layers still see them.
+
+Which layers: the paper perturbs the 4th-6th self-attention layers of GR00T N1 (blocks 7, 9, 11 in
+third_party/ACG), the last half, and gives no layers for pi0. By default we perturb the last half of
+pi0.5's 18 action-expert layers; `layers` picks others.
 
 Mechanics: LeRobot's PI05Pytorch.sample_actions calls self.denoise_step(...) once per step, and the
 action expert's layers each receive the same additive 4D mask (batch, 1, actions, prefix + actions)
 as `attention_mask`. We override denoise_step on the instance, and wrap the chosen layers' self_attn
-so that during the incoherent pass the actions<->actions block of their mask is the identity.
+so that during the incoherent pass their attention map is the identity.
 
 Usage:
   from acg_pi05 import set_acg_scale
-  set_acg_scale(policy, 2.0)                 # last half of the expert layers
-  set_acg_scale(policy, 2.0, layers=range(18))  # every layer
+  set_acg_scale(policy, 3.0)                 # last half of the expert layers
+  set_acg_scale(policy, 3.0, layers=range(18))  # every layer
   set_acg_scale(policy, None)                # off
 """
 
@@ -67,13 +74,13 @@ def parse_layers(spec: str, model) -> list[int]:
     return list(range(lo, hi + 1))
 
 
-def identity_actions(mask: torch.Tensor) -> torch.Tensor:
-    """Additive mask (B, 1, S, prefix + S) with its last S x S (actions <-> actions) block made diagonal."""
+def identity_attention(mask: torch.Tensor) -> torch.Tensor:
+    """Additive mask (B, 1, S, prefix + S) that leaves only the diagonal of the actions block: an identity
+    attention map, so each action token attends only to itself (Eq. 11)."""
     s = mask.shape[-2]
     eye = torch.eye(s, dtype=torch.bool, device=mask.device)
-    out = mask.clone()
-    block = out[..., -s:]
-    out[..., -s:] = torch.where(eye, block, torch.full_like(block, OPENPI_ATTENTION_MASK_VALUE))
+    out = torch.full_like(mask, OPENPI_ATTENTION_MASK_VALUE)
+    out[..., -s:] = torch.where(eye, mask[..., -s:], out[..., -s:])
     return out
 
 
@@ -82,7 +89,7 @@ def _wrap_self_attn(attn: torch.nn.Module, idx: int, state: dict) -> None:
 
     def forward(*args, **kwargs):
         if state["incoherent"] and idx in state["layers"] and kwargs.get("attention_mask") is not None:
-            kwargs["attention_mask"] = identity_actions(kwargs["attention_mask"])
+            kwargs["attention_mask"] = identity_attention(kwargs["attention_mask"])
         return plain(*args, **kwargs)
 
     attn.forward = forward
@@ -90,14 +97,14 @@ def _wrap_self_attn(attn: torch.nn.Module, idx: int, state: dict) -> None:
 
 def _acg_denoise_step(self, **kwargs):
     v = self._plain_denoise_step(**kwargs)
-    if self.acg_scale is None or self.acg_scale == 1.0:
+    if self.acg_scale is None or self.acg_scale == 0.0:
         return v
     self._acg_state["incoherent"] = True
     try:
-        v_inc = self._plain_denoise_step(**kwargs)
+        v_ic = self._plain_denoise_step(**kwargs)
     finally:
         self._acg_state["incoherent"] = False
-    return v + (self.acg_scale - 1.0) * (v - v_inc)
+    return (1.0 + self.acg_scale) * v - self.acg_scale * v_ic
 
 
 def set_acg_scale(policy, scale: float | None, layers: Iterable[int] | None = None) -> None:

@@ -11,8 +11,8 @@ hold the training stats, the camera renaming and (for RELATIVE=1 runs) the relat
 
 Usage:
   python scripts/serve_pi05.py --checkpoint outputs/train/pi05_inhand_lora/checkpoints/last/pretrained_model
-  python scripts/serve_pi05.py --checkpoint ... --acg-scale 2.0
-  python scripts/serve_pi05.py --checkpoint ... --acg-scale 1.25 --acg-layers 15-17
+  python scripts/serve_pi05.py --checkpoint ... --acg-scale 3.0
+  python scripts/serve_pi05.py --checkpoint ... --acg-scale 0.25 --acg-layers 15-17
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ class Args:
     root: Path = REPO / "data" / "lerobot"
     """Parent directory of the training dataset (only its metadata is read)."""
     acg_scale: float | None = None
-    """ACG guidance scale (scripts/acg_pi05.py); None = plain pi0.5."""
+    """ACG guidance scale, the paper's lambda (scripts/acg_pi05.py); None = plain pi0.5."""
     acg_layers: str = "half"
     """Action-expert layers ACG perturbs: "half" (last half), "all", or a range like "15-17"."""
     num_steps: int | None = None
