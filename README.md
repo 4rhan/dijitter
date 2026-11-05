@@ -88,10 +88,11 @@ python scripts/eval_sim.py --replay-episode third_party/abc/cache/val_sim/<episo
 ## ACG
 
 `scripts/acg_pi05.py` follows the paper's Algorithm 1 on LeRobot π0.5. Each denoising step runs a second pass in which
-the chosen layers use an identity attention map, so each action token attends only to itself, then uses
-`v = (1 + λ) * v - λ * v_incoherent`. On the server, `--acg-scale` is λ: 0 reproduces the baseline and the paper's default
-is 3. Eval runs named `*_acg<s>` predate this and used a different variant (actions still saw the prefix, λ = s - 1);
-new runs are named `*_lambda<λ>`. By default the last half of the action expert's layers are perturbed.
+the chosen layers stop action tokens attending to each other (they still see image, text and state, as in GR00T's
+separate cross-attention blocks), then uses `v = (1 + λ) * v - λ * v_incoherent`. On the server, `--acg-scale` is λ: 0
+reproduces the baseline, and the authors' released setting is λ = 2 (the paper's text says 3). Eval runs named `*_acg<s>`
+used λ = s - 1; `*_lambda<λ>` used the literal Eq. 11 mask, which also blinds those layers; `*_lambda<λ>_keepprefix` is
+the current version. By default the last half of the action expert's layers are perturbed.
 
 ## GPU box: LoRA fine-tune π0.5
 

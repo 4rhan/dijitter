@@ -11,7 +11,7 @@ hold the training stats, the camera renaming and (for RELATIVE=1 runs) the relat
 
 Usage:
   python scripts/serve_pi05.py --checkpoint outputs/train/pi05_inhand_lora/checkpoints/last/pretrained_model
-  python scripts/serve_pi05.py --checkpoint ... --acg-scale 3.0
+  python scripts/serve_pi05.py --checkpoint ... --acg-scale 2.0
   python scripts/serve_pi05.py --checkpoint ... --acg-scale 0.25 --acg-layers 15-17
 """
 
@@ -41,6 +41,8 @@ class Args:
     """Parent directory of the training dataset (only its metadata is read)."""
     acg_scale: float | None = None
     """ACG guidance scale, the paper's lambda (scripts/acg_pi05.py); None = plain pi0.5."""
+    acg_keep_prefix: bool = True
+    """Perturbed layers still see images, text and state; False applies Eq. 11 literally (scripts/acg_pi05.py)."""
     acg_layers: str = "half"
     """Action-expert layers ACG perturbs: "half" (last half), "all", or a range like "15-17"."""
     num_steps: int | None = None
@@ -82,7 +84,7 @@ class Pi05Server:
             import acg_pi05
 
             layers = acg_pi05.parse_layers(args.acg_layers, acg_pi05.find_pi05_model(self.policy))
-            acg_pi05.set_acg_scale(self.policy, args.acg_scale, layers)
+            acg_pi05.set_acg_scale(self.policy, args.acg_scale, layers, args.acg_keep_prefix)
         torch.manual_seed(args.seed)
 
     @torch.inference_mode()
@@ -118,6 +120,7 @@ async def serve(args: Args) -> None:
         "checkpoint": str(args.checkpoint),
         "acg_scale": args.acg_scale,
         "acg_layers": args.acg_layers if args.acg_scale is not None else None,
+        "acg_keep_prefix": args.acg_keep_prefix if args.acg_scale is not None else None,
         "num_steps": server.cfg.num_inference_steps,
         "state_dim": 14,
     }

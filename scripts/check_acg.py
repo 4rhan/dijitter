@@ -4,7 +4,8 @@
   2. scale -1 is the pure incoherent model (v_ic): it should be jerkier than plain pi0.5.
   3. scales > 0 steer away from it: chunks should get smoother, without moving far from plain pi0.5.
   4. mechanics: two model calls per denoising step; in the incoherent pass, exactly the chosen layers
-     get a mask whose attention map is the identity, with the whole prefix masked out.
+     get a mask whose actions<->actions block is the identity, with the prefix columns untouched
+     (--no-keep-prefix: an identity attention map with the whole prefix masked out).
 
 Layer sets: "half" (default, last half of the action expert), "all", or a range like "12-17".
 
@@ -42,6 +43,7 @@ class Args:
     episodes: tuple[int, ...] = (0, 10, 20, 30)
     frames_per_episode: int = 4
     seed: int = 0
+    keep_prefix: bool = True
 
 
 def jerk(chunks: np.ndarray) -> float:
@@ -75,8 +77,8 @@ def main(args: Args) -> None:
     rewrites = []
     plain_identity = acg_pi05.identity_attention
 
-    def recording_identity(mask):
-        out = plain_identity(mask)
+    def recording_identity(mask, keep_prefix=True):
+        out = plain_identity(mask, keep_prefix)
         rewrites.append((mask.detach(), out.detach()))
         return out
 
@@ -88,7 +90,7 @@ def main(args: Args) -> None:
         return post(policy.predict_action_chunk(pre(dict(frame)))).float().cpu().numpy()[0]
 
     def run(scale, layers=None):
-        acg_pi05.set_acg_scale(policy, scale, layers)
+        acg_pi05.set_acg_scale(policy, scale, layers, args.keep_prefix)
         calls["denoise"] = 0
         rewrites.clear()
         torch.cuda.synchronize()
@@ -126,16 +128,20 @@ def main(args: Args) -> None:
                 n = before.shape[-2]
                 eye = torch.eye(n, dtype=torch.bool, device=after.device)
                 attn_map = torch.softmax(after[0, 0].float(), dim=-1)
-                block_ok = bool(torch.equal(attn_map[:, -n:], eye.float()))
-                prefix_ok = bool((attn_map[:, :-n] == 0).all())
+                actions = attn_map[:, -n:]
+                block_ok = bool((actions[~eye] == 0).all()) and bool((actions[eye] > 0).all())
+                if args.keep_prefix:
+                    prefix_ok = bool(torch.equal(after[..., :-n], before[..., :-n]))
+                else:
+                    prefix_ok = bool((attn_map[:, :-n] == 0).all())
                 if not (block_ok and prefix_ok):
-                    failures.append(f"{spec} scale {s:g}: attention map identity {block_ok}, prefix masked {prefix_ok}")
+                    failures.append(f"{spec} scale {s:g}: actions block identity {block_ok}, prefix as intended {prefix_ok}")
 
     acg_pi05.identity_actions = plain_identity
     acg_pi05.set_acg_scale(policy, None)
     if failures:
         raise SystemExit("ACG check FAILED:\n  " + "\n  ".join(failures))
-    print("\nACG mechanics check passed (calls, identity at scale 0, identity attention map per layer)")
+    print("\nACG mechanics check passed (calls, identity at scale 0, per-layer mask rewrite)")
 
 
 if __name__ == "__main__":
