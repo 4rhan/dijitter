@@ -5,6 +5,8 @@
 #   HF_TOKEN=hf_... bash scripts/cloud/run_train.sh
 #   STEPS=50 NO_STOP=1 bash scripts/cloud/run_train.sh     # dry run, keep the node up afterwards
 #
+#   EASY=1 OUT=outputs/train/pi05_easy_h100 bash scripts/cloud/run_train.sh   # abc_easy (see easy_task.sh)
+#
 # Every run is logged to $HOME/logs/run_<time>.log. Training env knobs (STEPS, BATCH, GRAD_CKPT,
 # SAVE_FREQ, NUM_WORKERS, RELATIVE, OUT) are passed through to scripts/train_lora.sh.
 #
@@ -36,6 +38,7 @@ command -v ffmpeg >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEN
   || echo "ffmpeg install failed; video decoding will fall back to pyav"
 bash scripts/cloud/setup_node.sh || exit 1
 source scripts/cloud/env.sh
+if [ "${EASY:-0}" = 1 ]; then export REPO_ID=abc_easy; fi
 # An H100 has 80 GB: no gradient checkpointing needed, and checkpoints often in case the host drops.
 GRAD_CKPT=${GRAD_CKPT:-false} SAVE_FREQ=${SAVE_FREQ:-1000} NUM_WORKERS=${NUM_WORKERS:-$(( $(nproc) > 16 ? 12 : $(nproc) / 2 + 1 ))} \
   bash scripts/train_lora.sh

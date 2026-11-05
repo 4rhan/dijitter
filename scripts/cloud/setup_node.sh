@@ -7,12 +7,20 @@
 #
 # HF_TOKEN must have access to google/paligemma-3b-pt-224 (gated); pi05 uses its tokenizer.
 # EPISODES (default 100, same as the lab-box dataset) sets how many demos are converted.
+# EASY=1 builds abc_easy instead (same filter as scripts/easy_task.sh, 200 demos by default).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/cloud/env.sh
 
-EPISODES=${EPISODES:-100}
-DATASET=abc_inhand_transfer
+if [ "${EASY:-0}" = 1 ]; then
+  EPISODES=${EPISODES:-200}
+  DATASET=abc_easy
+  FILTER=(--categories can rolling_pin pizza_cutter whisk --sides left)
+else
+  EPISODES=${EPISODES:-100}
+  DATASET=abc_inhand_transfer
+  FILTER=()
+fi
 DONE=$HOME/.dj_done
 mkdir -p "$DONE"
 
@@ -50,12 +58,12 @@ sys.exit(prepare_sim_data(cfg, cfg.cache.expanduser().resolve()))
 }
 
 dataset() {
-  rm -f "$DONE"/dataset_*  # a rebuilt dataset invalidates every derived one
+  rm -f "$DONE/dataset_rel_${DATASET}_"*  # a rebuilt dataset invalidates its derived one
   # LeRobot's writer is single-threaded Python (~30 s/episode), so convert shards in parallel.
   local workers=$(( $(nproc) / 3 ))
   workers=$(( workers < 1 ? 1 : workers > 16 ? 16 : workers ))
-  python scripts/abc_to_lerobot.py --repo-id "$DATASET" --max-episodes "$EPISODES" --workers "$workers" --overwrite
-  python scripts/check_lerobot.py --repo-id "$DATASET"
+  python scripts/abc_to_lerobot.py --repo-id "$DATASET" "${FILTER[@]}" --max-episodes "$EPISODES" --workers "$workers" --overwrite
+  python scripts/check_lerobot.py --repo-id "$DATASET" "${FILTER[@]}"
 }
 
 # Same dataset with action stats recomputed on 50-step chunks relative to the state (arm joints only,
@@ -78,9 +86,9 @@ step venv venv
 source "$UV_PROJECT_ENVIRONMENT/bin/activate"
 step models models
 step abc_data abc_data
-step "dataset_$EPISODES" dataset
-step "dataset_rel_$EPISODES" dataset_rel
-step smoke smoke
+step "dataset_${DATASET}_$EPISODES" dataset
+step "dataset_rel_${DATASET}_$EPISODES" dataset_rel
+step "smoke_$DATASET" smoke
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 echo "video decoder for training: $(python -c 'from lerobot.utils.import_utils import get_safe_default_video_backend as f; print(f())' 2>/dev/null)"
 echo "cpus: $(nproc)  ram: $(free -g | awk '/Mem/ {print $2}') GB  disk: $(df -h "$HOME" | awk 'END {print $4}') free"
