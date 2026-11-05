@@ -92,7 +92,8 @@ the chosen layers stop action tokens attending to each other (they still see ima
 separate cross-attention blocks), then uses `v = (1 + λ) * v - λ * v_incoherent`. On the server, `--acg-scale` is λ: 0
 reproduces the baseline, and the authors' released setting is λ = 2 (the paper's text says 3). Eval runs named `*_acg<s>`
 used λ = s - 1; `*_lambda<λ>` used the literal Eq. 11 mask, which also blinds those layers; `*_lambda<λ>_keepprefix` is
-the current version. By default the last half of the action expert's layers are perturbed.
+the current version. By default the last half of the action expert's layers are perturbed. ACG needs many more denoising
+steps than π0.5's default 10 (`NUM_STEPS=64` in `run_eval.sh`, see `scripts/acg_pi05.py`).
 
 ## GPU box: LoRA fine-tune π0.5
 

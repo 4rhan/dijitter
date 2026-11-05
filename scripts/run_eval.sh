@@ -4,6 +4,7 @@
 #   bash scripts/run_eval.sh                                   # baseline only, 50 episodes
 #   SCALES="none 0.5 1 2" bash scripts/run_eval.sh             # baseline + ACG sweep
 #   ACG_LAYERS=15-17 SCALES=0.25 bash scripts/run_eval.sh      # ACG on chosen action-expert layers
+#   NUM_STEPS=64 ACG_LAYERS=15-17 SCALES="none 1" bash scripts/run_eval.sh   # more denoising steps (see scripts/acg_pi05.py)
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/006000/pretrained_model N=10 bash scripts/run_eval.sh
 #   CKPT=... REPO_ID=abc_easy EVAL_ARGS="--categories can whisk --sides left" bash scripts/run_eval.sh
 #   EVAL_ARGS="--save-video" NAME=videos N=10 bash scripts/run_eval.sh   # extra eval_sim.py flags
@@ -19,6 +20,9 @@ SCALES=${SCALES:-none}
 N=${N:-50}
 EVAL_ARGS=${EVAL_ARGS:-}
 ACG_LAYERS=${ACG_LAYERS:-half}  # action-expert layers ACG perturbs (see scripts/acg_pi05.py)
+NUM_STEPS=${NUM_STEPS:-}  # denoising steps; empty = the checkpoint's own (10)
+steps=()
+if [ -n "$NUM_STEPS" ]; then steps=(--num-steps "$NUM_STEPS"); fi
 PORT=${PORT:-8000}
 REPO_ID=${REPO_ID:-abc_inhand_transfer}  # the dataset the checkpoint was trained on
 export HF_HUB_OFFLINE=1
@@ -35,9 +39,10 @@ for s in $SCALES; do
     tag=${NAME}_lambda${s}_keepprefix; acg=(--acg-scale "$s" --acg-layers "$ACG_LAYERS")
     [ "$ACG_LAYERS" = half ] || tag=${tag}_L$ACG_LAYERS
   fi
+  if [ -n "$NUM_STEPS" ]; then tag=${tag}_steps$NUM_STEPS; fi
   if [ -f "outputs/eval/$tag/summary.json" ]; then echo "== $tag: already done"; continue; fi
   echo "== $tag: serving $CKPT ${acg[*]}"
-  python scripts/serve_pi05.py --checkpoint "$CKPT" --repo-id "$REPO_ID" --port "$PORT" "${acg[@]}" > "outputs/eval/$tag.server.log" 2>&1 &
+  python scripts/serve_pi05.py --checkpoint "$CKPT" --repo-id "$REPO_ID" --port "$PORT" "${acg[@]}" "${steps[@]}" > "outputs/eval/$tag.server.log" 2>&1 &
   SERVER=$!
   until grep -q "pi05 server" "outputs/eval/$tag.server.log"; do
     kill -0 "$SERVER" 2>/dev/null || { echo "server died:"; tail -20 "outputs/eval/$tag.server.log"; exit 1; }
