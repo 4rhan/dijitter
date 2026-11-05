@@ -17,6 +17,8 @@
 #   - LORA_SCOPE=expert leaves the PaliGemma LM frozen. Less to backpropagate, fewer params to adapt.
 #   - the learning rate decays over the whole run (LeRobot's default stops at 30k and stays at the floor).
 #   - rename_map: our camera keys -> the ones pi05_base was trained with (same as test_pi05.py).
+#     RENAME_MAP replaces it for a dataset with other camera names, as JSON. Map every camera: LeRobot
+#     can fill a camera it does not find with a blank image instead of failing.
 #   - pi05_base is read from the shared HF cache and never modified; checkpoints are adapters only.
 #     BASE picks the copy: by default a cached snapshot that is complete, since the cache's
 #     refs/main can point at a snapshot holding only the weights, which fails offline.
@@ -36,6 +38,8 @@ NUM_WORKERS=${NUM_WORKERS:-4}
 GRAD_CKPT=${GRAD_CKPT:-true}
 SAVE_FREQ=${SAVE_FREQ:-2000}
 LORA_SCOPE=${LORA_SCOPE:-all}
+SIM_RENAME_MAP='{"observation.images.top_rgb": "observation.images.base_0_rgb", "observation.images.left_rgb": "observation.images.left_wrist_0_rgb", "observation.images.right_rgb": "observation.images.right_wrist_0_rgb"}'
+RENAME_MAP=${RENAME_MAP:-$SIM_RENAME_MAP}
 case "$LORA_SCOPE" in
   all) LORA_BLOCKS="language_model|gemma_expert" ;;
   expert) LORA_BLOCKS="gemma_expert" ;;
@@ -80,7 +84,7 @@ lerobot-train \
   "--peft.target_modules=(.*\.($LORA_BLOCKS)\..*\.(self_attn\.(q|k|v|o)_proj|mlp\.(gate|up|down)_proj)|model\.(action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out))" \
   --dataset.repo_id="$REPO_ID" \
   --dataset.root="data/lerobot/$REPO_ID" \
-  --rename_map='{"observation.images.top_rgb": "observation.images.base_0_rgb", "observation.images.left_rgb": "observation.images.left_wrist_0_rgb", "observation.images.right_rgb": "observation.images.right_wrist_0_rgb"}' \
+  --rename_map="$RENAME_MAP" \
   --output_dir="$OUT" \
   --batch_size="$BATCH" \
   --num_workers="$NUM_WORKERS" \
