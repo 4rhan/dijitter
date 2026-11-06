@@ -41,7 +41,9 @@ step() {  # step <name> <command...>: run once, then remember it
 
 install_uv() { command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh; }
 submodule() { git submodule update --init third_party/abc; }
-venv() { uv sync --extra gpu --locked; }
+# The node image points uv at its own package mirror (UV_INDEX_URL / UV_DEFAULT_INDEX), which makes
+# --locked fail: the lockfile names pypi.org. Same versions and hashes either way, so use the lockfile's.
+venv() { env -u UV_INDEX_URL -u UV_DEFAULT_INDEX uv sync --extra gpu --locked; }
 
 models() {
   : "${HF_TOKEN:?set HF_TOKEN (needs access to google/paligemma-3b-pt-224)}"
