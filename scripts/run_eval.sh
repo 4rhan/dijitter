@@ -8,6 +8,8 @@
 #   CKPT=outputs/train/pi05_inhand_lora/checkpoints/006000/pretrained_model N=10 bash scripts/run_eval.sh
 #   CKPT=... REPO_ID=abc_easy EVAL_ARGS="--categories can whisk --sides left" bash scripts/run_eval.sh
 #   EVAL_ARGS="--save-video" NAME=videos N=10 bash scripts/run_eval.sh   # extra eval_sim.py flags
+#   SCALES="none 1" NAME=vid EVAL_ARGS="--seeds 3 17 --save-video" bash scripts/run_eval.sh   # chosen worlds on video,
+#     then: python scripts/side_by_side.py --run baseline=outputs/eval/vid_baseline --run acg=outputs/eval/vid_lambda1_keepprefix --out ...
 #
 # For each setting: start scripts/serve_pi05.py, wait for it to load, run scripts/eval_sim.py, stop the
 # server. Results land in outputs/eval/<NAME>_<setting>/summary.json; the last lines compare them.

@@ -18,6 +18,7 @@ Usage:
   python scripts/eval_sim.py --replay-episode <abc episode dir> --tag mock_replay   # with mock server in replay mode
   python scripts/eval_sim.py --viser --tag watch --num-episodes 3   # live 3D view at http://<host>:8080, real time
   python scripts/eval_sim.py --categories can whisk --sides left --tag easy   # only worlds with these objects/sides
+  python scripts/eval_sim.py --seeds 3 17 42 --save-video --tag vid_baseline   # exactly these worlds, with video
 """
 
 from __future__ import annotations
@@ -54,6 +55,9 @@ class Args:
     seed: int = 0
     """Episodes use seed, seed + 1, ... (skipping worlds the filters reject), so runs with the same
     seed and filters see the same worlds."""
+    seeds: tuple[int, ...] = ()
+    """Run exactly these world seeds (from an earlier run's summary.json), ignoring --seed,
+    --num-episodes and the filters. For re-running chosen worlds, e.g. with --save-video."""
     categories: tuple[str, ...] = ()
     """Only run worlds with these objects (empty = all). Must match what the policy was trained on."""
     sides: tuple[str, ...] = ()
@@ -290,7 +294,11 @@ def main(args: Args) -> None:
 
     per_episode = []
     try:
-        seeds = [args.seed + k for k in range(args.num_episodes)] if replay else select_seeds(env, args)
+        if args.seeds:
+            seeds = list(args.seeds)
+            args.num_episodes = len(seeds)
+        else:
+            seeds = [args.seed + k for k in range(args.num_episodes)] if replay else select_seeds(env, args)
         for k, seed in enumerate(seeds):
             r = run_episode(env, replay, policy, args, seed, viewer)
             m = {
