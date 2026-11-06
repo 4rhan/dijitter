@@ -6,7 +6,7 @@
 #   MOCK=1 bash scripts/serve_karma.sh                            # no model: arms hold still (link test)
 #   bash scripts/serve_karma.sh --save-frames outputs/karma_frames   # extra flags go to serve_karma.py
 #
-# The model needs about 8 GB of GPU memory and stops if less is free. The box is shared: while this
+# The model needs about 10 GB of GPU memory (9.1 GiB peak measured) and stops if less is free. The box is shared: while this
 # runs, jobs that wait for a free GPU (Sahil's queue) stay paused, so stop it (Ctrl-C) when done.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -20,8 +20,8 @@ fi
 CKPT=${CKPT:-outputs/train/pi05_two_cube_lora/checkpoints/last/pretrained_model}
 [ -f "$CKPT/train_config.json" ] || { echo "no checkpoint at $CKPT"; exit 1; }
 free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1)
-if [ "$free" -lt "${NEED_FREE_MB:-9000}" ]; then
-  echo "only $free MB of GPU memory free, the server needs about 8 GB; what is running:"
+if [ "$free" -lt "${NEED_FREE_MB:-10500}" ]; then
+  echo "only $free MB of GPU memory free, the server needs about 10 GB; what is running:"
   nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader
   exit 1
 fi

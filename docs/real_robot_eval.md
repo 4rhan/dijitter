@@ -17,7 +17,7 @@ radians on both sides. Cameras are 848x480 on both sides.
    `python scripts/check_karma_server.py` should end with `PASS`.
 3. Start the server (last checkpoint of `pi05_two_cube_lora`; `CKPT=...` picks another):
    `bash scripts/serve_karma.sh`
-   It prints this host's addresses and the karma flags. It needs about 8 GB of GPU memory, and jobs
+   It prints this host's addresses and the karma flags. It needs about 10 GB of GPU memory, and jobs
    that wait for a free GPU (Sahil's queue) stay paused while it runs, so Ctrl-C it when done.
 
 ## On the robot PC (karma checkout)

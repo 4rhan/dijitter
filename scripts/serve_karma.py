@@ -92,11 +92,11 @@ def decode_image(frame) -> np.ndarray:
     """1-D uint8 = JPEG/PNG bytes, HxWx3 = raw RGB (karma --raw-frames)."""
     array = np.asarray(frame)
     if array.ndim == 3 and array.shape[2] == 3:
-        return np.ascontiguousarray(array.astype(np.uint8, copy=False))
+        return np.array(array, dtype=np.uint8)  # a writable copy: json frames are read-only buffers
     if array.ndim == 1 and array.dtype == np.uint8:
         from PIL import Image
 
-        return np.asarray(Image.open(io.BytesIO(array.tobytes())).convert("RGB"), dtype=np.uint8)
+        return np.array(Image.open(io.BytesIO(array.tobytes())).convert("RGB"), dtype=np.uint8)
     raise ValueError(f"camera frame must be encoded bytes (1-D uint8) or HxWx3, got {array.shape} {array.dtype}")
 
 
