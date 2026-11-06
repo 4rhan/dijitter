@@ -31,7 +31,7 @@ def font(size: int):
 
 
 def load_run(spec: str) -> tuple[str, Path, dict[int, dict]]:
-    name, _, path = spec.partition("=")
+    name, _, path = spec.rpartition("=")
     if not path:
         raise SystemExit(f"--run needs NAME=DIR, got {spec!r}")
     d = Path(path)
