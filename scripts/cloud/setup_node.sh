@@ -8,11 +8,16 @@
 # HF_TOKEN must have access to google/paligemma-3b-pt-224 (gated); pi05 uses its tokenizer.
 # EPISODES (default 100, same as the lab-box dataset) sets how many demos are converted.
 # EASY=1 builds abc_easy instead (same filter as scripts/easy_task.sh, 200 demos by default).
+# MID=1 builds abc_mid: the same four objects from both sides (450 demos, 234k frames).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/cloud/env.sh
 
-if [ "${EASY:-0}" = 1 ]; then
+if [ "${MID:-0}" = 1 ]; then
+  EPISODES=${EPISODES:-450}
+  DATASET=abc_mid
+  FILTER=(--categories can rolling_pin pizza_cutter whisk --sides left right)
+elif [ "${EASY:-0}" = 1 ]; then
   EPISODES=${EPISODES:-200}
   DATASET=abc_easy
   FILTER=(--categories can rolling_pin pizza_cutter whisk --sides left)

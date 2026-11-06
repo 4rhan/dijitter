@@ -20,6 +20,13 @@ CATEGORIES="can rolling_pin pizza_cutter whisk"
 SIDES=left
 EPISODES=${EPISODES:-200}
 DATASET=abc_easy
+PREFIX=easy
+if [ "${MID:-0}" = 1 ]; then  # MID=1: the same four objects from both sides (450 demos)
+  SIDES="left right"
+  EPISODES=${EPISODES_MID:-450}
+  DATASET=abc_mid
+  PREFIX=mid
+fi
 
 case "${1:-}" in
   prepare)
@@ -49,7 +56,7 @@ case "${1:-}" in
     export REPO_ID=${REPO_ID:-$DATASET}
     export CKPT=${CKPT:-${OUT:-outputs/train/pi05_easy_lora}/checkpoints/last/pretrained_model}
     export EVAL_ARGS="--categories $CATEGORIES --sides $SIDES ${EVAL_ARGS:-}"
-    if [ -z "${NAME:-}" ]; then export NAME="easy_$(basename "$(dirname "$(readlink -f "$CKPT")")")"; fi
+    if [ -z "${NAME:-}" ]; then export NAME="${PREFIX}_$(basename "$(dirname "$(readlink -f "$CKPT")")")"; fi
     bash scripts/run_eval.sh
     ;;
   *)

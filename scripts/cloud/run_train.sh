@@ -6,6 +6,10 @@
 #   STEPS=50 NO_STOP=1 bash scripts/cloud/run_train.sh     # dry run, keep the node up afterwards
 #
 #   EASY=1 bash scripts/cloud/run_train.sh   # abc_easy (see easy_task.sh) -> outputs/train/pi05_easy_h100
+#   MID=1 bash scripts/cloud/run_train.sh    # abc_mid, easy objects from both sides -> outputs/train/pi05_mid_h100
+#
+# HF_UPLOAD=<user>/<repo> also uploads the packed checkpoints to that (private) Hugging Face model repo
+# before the node stops, so they can be downloaded without waking the node. HF_TOKEN needs write access.
 #
 # Use a separate OUT for a dry run: resuming keeps the saved config, so a real run that continued a
 # 50-step test would keep its 50-step LR decay. A run ends by packing its checkpoints into
@@ -42,7 +46,10 @@ command -v ffmpeg >/dev/null || { sudo apt-get update -qq && sudo DEBIAN_FRONTEN
   || echo "ffmpeg install failed; video decoding will fall back to pyav"
 bash scripts/cloud/setup_node.sh || exit 1
 source scripts/cloud/env.sh
-if [ "${EASY:-0}" = 1 ]; then
+if [ "${MID:-0}" = 1 ]; then
+  export REPO_ID=abc_mid
+  export OUT=${OUT:-outputs/train/pi05_mid_h100}
+elif [ "${EASY:-0}" = 1 ]; then
   export REPO_ID=abc_easy
   export OUT=${OUT:-outputs/train/pi05_easy_h100}
 else
@@ -56,4 +63,11 @@ if [ "${RELATIVE:-0}" = 1 ] && [ -e "$OUT/checkpoints/last" ]; then
   python scripts/cloud/check_relative.py "$OUT/checkpoints/last/pretrained_model" || rc=1
 fi
 bash scripts/cloud/bundle_ckpts.sh "$OUT" || echo "bundling failed; the checkpoints are still in $OUT"
+TAR=$HOME/export/$(basename "$OUT").tar
+if [ -n "${HF_UPLOAD:-}" ] && [ -f "$TAR" ]; then
+  # Before the node stops: a stopped node has to be woken (a queue) to download from it.
+  hf upload "$HF_UPLOAD" "$TAR" "$(basename "$TAR")" --private --commit-message "$(basename "$OUT") checkpoints" \
+    && echo "uploaded $TAR to https://huggingface.co/$HF_UPLOAD" \
+    || echo "upload to $HF_UPLOAD failed; the checkpoints are still in $TAR"
+fi
 exit "$rc"
