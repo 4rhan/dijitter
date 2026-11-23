@@ -244,14 +244,19 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
     steps_to_success = np.full(B, -1)
     chunk = prev = None
     used = 0
+    tm = dict(render=0.0, infer=0.0, step=0.0, other=0.0)
+    t_last = time.perf_counter()
     for t in range(args.max_steps):
         state = np.concatenate([env.state() for env in envs])
         k = t % args.execute_steps
         if k == 0:
+            t1 = time.perf_counter(); tm["other"] += t1 - t_last
             cams = [env.render_cameras() for env in envs]
             images = {c: torch.cat([cam[c] for cam in cams]) for c in CAMERA_KEYS}
+            torch.cuda.synchronize(); t2 = time.perf_counter(); tm["render"] += t2 - t1
             prev, used = chunk, args.execute_steps
             chunk = pi05.chunks(images, state)
+            t_last = time.perf_counter(); tm["infer"] += t_last - t2
         base = np.stack([blended_action(chunk[b], k, None if prev is None else prev[b], used, args.blend_steps)
                          for b in range(B)])
         qpos = np.concatenate([env.qpos for env in envs])
@@ -272,11 +277,13 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
         act[:, list(GRIPPERS)] = np.clip(act[:, list(GRIPPERS)], 0.0, 1.0)
         prog = np.zeros(B, np.float32)
         succ_now = np.zeros(B, bool)
+        t1 = time.perf_counter(); tm["other"] += t1 - t_last
         for e, env in enumerate(envs):
             sl = slice(e * args.copies, (e + 1) * args.copies)
             res = env.step(act[sl])
             prog[sl] = res.reward
             succ_now[sl] = np.asarray(res.metrics.get("ever_success", res.success), bool)
+        t_last = time.perf_counter(); tm["step"] += t_last - t1
         new_success = succ_now & ~success
         r = (args.progress_weight * (prog - prev_prog) + args.success_bonus * new_success
              - args.action_penalty * (np.tanh(raw.cpu().numpy()) ** 2).sum(-1))
@@ -294,7 +301,8 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
         last_v = (residual.value(o_t).cpu().numpy() if residual is not None else np.zeros(B))
     return dict(obs=np.stack(obs_l), raw=np.stack(raw_l), logp=np.stack(logp_l), rew=np.stack(rew_l),
                 alive=np.stack(alive_l), val=np.stack(val_l), last_v=np.where(success, 0.0, last_v),
-                success=success, steps=steps_to_success, final_progress=prev_prog)
+                success=success, steps=steps_to_success, final_progress=prev_prog,
+                steps_run=t + 1, timing={k: round(v, 1) for k, v in tm.items()})
 
 
 def gae(ro, gamma, lam):
@@ -383,7 +391,8 @@ def main(args: Args) -> None:
             s = summary(ro, args.copies)
             rows += [dict(seed=sd, success=p) for sd, p in zip(group, s["per_world"])]
             print(f"eval {i + len(group)}/{len(seeds)} worlds: running success "
-                  f"{np.mean([r['success'] for r in rows]):.3f}", flush=True)
+                  f"{np.mean([r['success'] for r in rows]):.3f} | batch {s['success']:.3f}, {ro['steps_run']} steps, "
+                  f"time {ro['timing']}", flush=True)
         tag = "residual" if res is not None else "pi05_alone"
         result = dict(tag=tag, residual=str(args.residual), worlds=len(rows), copies=args.copies,
                       success=float(np.mean([r["success"] for r in rows])), per_world=rows)
@@ -416,11 +425,11 @@ def main(args: Args) -> None:
                    ep_return=float(ro["rew"].sum(0).mean()),
                    mean_abs_delta=float(np.abs(np.tanh(ro["raw"][ro["alive"]])).mean()),
                    std=float(res.log_std.exp().mean()), rollout_s=round(t_roll, 1),
-                   total_s=round(time.time() - t_it, 1), **stats)
+                   total_s=round(time.time() - t_it, 1), steps_run=ro["steps_run"], timing=ro["timing"], **stats)
         log.write(json.dumps(row) + "\n"); log.flush()
         print(f"it {it}: success {row['success']:.3f} progress {row['progress']:.3f} return {row['ep_return']:.2f} "
               f"|delta| {row['mean_abs_delta']:.3f} kl {row['approx_kl']:.4f} ({row['rollout_s']}s roll, "
-              f"{row['total_s']}s total)", flush=True)
+              f"{row['total_s']}s total, {row['steps_run']} steps, {row['timing']})", flush=True)
         if it % args.save_every == 0 or it == args.iterations - 1:
             ck = dict(residual=res.state_dict(), opt=opt.state_dict(), iteration=it, args=dataclasses.asdict(args))
             torch.save(ck, args.out / "last.pt")
