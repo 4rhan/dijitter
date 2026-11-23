@@ -83,6 +83,9 @@ class Args:
     pi0.5 to ~14%."""
 
     # residual
+    act_every: int = 5
+    """The residual decides once per this many steps and holds its correction in between: exploration
+    becomes a visible, temporally coherent nudge, and an episode is ~180 decisions instead of 900."""
     arm_scale: float = 0.05
     gripper_scale: float = 0.1
     hidden: int = 256
@@ -95,16 +98,24 @@ class Args:
 
     # PPO
     iterations: int = 400
-    lr: float = 3e-4
+    lr: float = 5e-4
     gamma: float = 0.99
     lam: float = 0.95
     clip: float = 0.2
-    epochs: int = 4
-    minibatch: int = 8192
+    epochs: int = 8
+    minibatch: int = 4096
     value_coef: float = 0.5
     entropy_coef: float = 0.0
     max_grad_norm: float = 1.0
     save_every: int = 5
+    val_every: int = 5
+    """Every this many iterations: the residual's mean action (no exploration noise) on fixed validation
+    worlds. This, not the noisy training success, is the number that has to go up."""
+    val_seed_start: int = 20_000
+    val_worlds: int = 4
+    prioritize: bool = True
+    """Sample training worlds by p(1-p) of their recent success: worlds pi0.5 always or never solves
+    carry no learning signal."""
     seed: int = 0
     dry_run: bool = False
 
@@ -272,7 +283,10 @@ ACT_DIM = 14
 
 
 def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual | None, stochastic: bool):
-    """Run every env (one world each, `copies` copies) for one episode. Returns per-step arrays [T, B]."""
+    """Run every env (one world each, `copies` copies) for one episode.
+
+    Returns per-DECISION arrays [D, B]: the residual acts at every `act_every`-th step and holds its
+    correction; a decision's reward is the sum of the step rewards while it was held."""
     B = len(envs) * args.copies
     scale = torch.full((ACT_DIM,), args.arm_scale, device="cuda")
     scale[list(GRIPPERS)] = args.gripper_scale
@@ -288,6 +302,10 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
     steps_to_success = np.full(B, -1)
     chunk = prev = None
     used = 0
+    pending = np.zeros(B, np.float32)
+    raw = torch.zeros(B, ACT_DIM, device="cuda")
+    delta = np.zeros((B, ACT_DIM), np.float32)
+    penalty = np.zeros(B, np.float32)
     tm = dict(render=0.0, infer=0.0, step=0.0, other=0.0)
     t_last = time.perf_counter()
     for t in range(args.max_steps):
@@ -303,20 +321,29 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
             t_last = time.perf_counter(); tm["infer"] += t_last - t2
         base = np.stack([blended_action(chunk[b], k, None if prev is None else prev[b], used, args.blend_steps)
                          for b in range(B)])
-        qpos = np.concatenate([env.qpos for env in envs])
-        obj = np.stack([qpos[e * args.copies:(e + 1) * args.copies, a:a + 7] for e, a in enumerate(adrs)]).reshape(B, 7)
-        o = np.concatenate([state, obj, base, np.full((B, 1), k / args.execute_steps),
-                            np.full((B, 1), t / args.max_steps)], axis=1).astype(np.float32)
-        o_t = torch.as_tensor(o, device="cuda")
-        if residual is None:
-            raw = torch.zeros(B, ACT_DIM, device="cuda")
-            logp = val = torch.zeros(B, device="cuda")
-        else:
-            with torch.no_grad():
-                d = residual.dist(o_t)
-                raw = d.sample() if stochastic else d.mean
-                logp, val = d.log_prob(raw).sum(-1), residual.value(o_t)
-        delta = (torch.tanh(raw) * scale).cpu().numpy()
+        if t % args.act_every == 0:
+            if t > 0:
+                rew_l.append(pending.copy())
+                pending[:] = 0.0
+            qpos = np.concatenate([env.qpos for env in envs])
+            obj = np.stack([qpos[e * args.copies:(e + 1) * args.copies, a:a + 7]
+                            for e, a in enumerate(adrs)]).reshape(B, 7)
+            o = np.concatenate([state, obj, base, np.full((B, 1), k / args.execute_steps),
+                                np.full((B, 1), t / args.max_steps)], axis=1).astype(np.float32)
+            o_t = torch.as_tensor(o, device="cuda")
+            if residual is None:
+                raw = torch.zeros(B, ACT_DIM, device="cuda")
+                logp = val = torch.zeros(B, device="cuda")
+            else:
+                with torch.no_grad():
+                    d = residual.dist(o_t)
+                    raw = d.sample() if stochastic else d.mean
+                    logp, val = d.log_prob(raw).sum(-1), residual.value(o_t)
+            squashed = torch.tanh(raw)
+            delta = (squashed * scale).cpu().numpy()
+            penalty = (squashed ** 2).sum(-1).cpu().numpy()
+            obs_l.append(o); raw_l.append(raw.cpu().numpy()); logp_l.append(logp.cpu().numpy())
+            val_l.append(val.cpu().numpy()); alive_l.append(~done)
         act = base + delta
         act[:, list(GRIPPERS)] = np.clip(act[:, list(GRIPPERS)], 0.0, 1.0)
         prog = np.zeros(B, np.float32)
@@ -329,18 +356,15 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
             succ_now[sl] = np.asarray(res.metrics.get("ever_success", res.success), bool)
         t_last = time.perf_counter(); tm["step"] += t_last - t1
         new_success = succ_now & ~success
-        r = (args.progress_weight * (prog - prev_prog) + args.success_bonus * new_success
-             - args.action_penalty * (np.tanh(raw.cpu().numpy()) ** 2).sum(-1))
-        alive = ~done
-        obs_l.append(o); raw_l.append(raw.cpu().numpy()); logp_l.append(logp.cpu().numpy())
-        val_l.append(val.cpu().numpy()); rew_l.append(np.where(alive, r, 0.0).astype(np.float32))
-        alive_l.append(alive)
-        steps_to_success[new_success & alive] = t + 1
+        r = args.progress_weight * (prog - prev_prog) + args.success_bonus * new_success - args.action_penalty * penalty
+        pending += np.where(~done, r, 0.0).astype(np.float32)
+        steps_to_success[new_success & ~done] = t + 1
         success |= succ_now
         prev_prog = prog
         done |= success
         if done.all():
             break
+    rew_l.append(pending.copy())
     with torch.no_grad():
         last_v = (residual.value(o_t).cpu().numpy() if residual is not None else np.zeros(B))
     return dict(obs=np.stack(obs_l), raw=np.stack(raw_l), logp=np.stack(logp_l), rew=np.stack(rew_l),
@@ -365,7 +389,7 @@ def gae(ro, gamma, lam):
 
 
 def ppo_update(args: Args, res: Residual, opt, ro):
-    adv, ret = gae(ro, args.gamma, args.lam)
+    adv, ret = gae(ro, args.gamma ** args.act_every, args.lam)
     m = ro["alive"].reshape(-1)
     obs = torch.as_tensor(ro["obs"].reshape(-1, OBS_DIM)[m], device="cuda")
     raw = torch.as_tensor(ro["raw"].reshape(-1, ACT_DIM)[m], device="cuda")
@@ -458,11 +482,39 @@ def main(args: Args) -> None:
         ck = torch.load(args.out / "last.pt", map_location="cuda")
         res.load_state_dict(ck["residual"]); opt.load_state_dict(ck["opt"]); start = ck["iteration"] + 1
         print(f"resuming at iteration {start}", flush=True)
+    else:
+        ck = {}
+    world_p = {int(s): None for s in train_seeds}
+    if (args.out / "last.pt").exists() and "world_p" in ck:
+        world_p.update({int(k): v for k, v in ck["world_p"].items()})
+    val_seeds = select_seeds(envs[0], args.val_seed_start, args.val_worlds if not args.dry_run else 2,
+                             args.categories, args.sides)
     log = (args.out / "log.jsonl").open("a")
+
+    def validate(it: int, residual) -> None:
+        groups = [val_seeds[i:i + args.envs] for i in range(0, len(val_seeds), args.envs)]
+        per_world = []
+        for g in groups:
+            per_world += summary(rollout(args, pi05, envs[:len(g)], g, residual, stochastic=False), args.copies)["per_world"]
+        row = dict(iteration=it, val=True, residual=residual is not None, success=float(np.mean(per_world)),
+                   per_world=per_world, seeds=val_seeds)
+        log.write(json.dumps(row) + "\n"); log.flush()
+        print(f"VAL it {it} ({'residual mean' if residual is not None else 'pi0.5 alone'}): success "
+              f"{row['success']:.3f} per world {per_world}", flush=True)
+
+    if start == 0:
+        validate(-1, None)
     for it in range(start, args.iterations):
         t_it = time.time()
-        seeds = [int(s) for s in rng.choice(train_seeds, size=args.envs, replace=False)]
+        if args.prioritize:
+            p = np.array([0.5 if world_p[s] is None else world_p[s] for s in train_seeds])
+            w = p * (1 - p) + 0.02
+            seeds = [int(s) for s in rng.choice(train_seeds, size=args.envs, replace=False, p=w / w.sum())]
+        else:
+            seeds = [int(s) for s in rng.choice(train_seeds, size=args.envs, replace=False)]
         ro = rollout(args, pi05, envs, seeds, res, stochastic=True)
+        for sd, pw in zip(seeds, summary(ro, args.copies)["per_world"]):
+            world_p[sd] = pw if world_p[sd] is None else 0.5 * world_p[sd] + 0.5 * pw
         t_roll = time.time() - t_it
         stats = ppo_update(args, res, opt, ro)
         row = dict(iteration=it, **summary(ro, args.copies), seeds=seeds,
@@ -475,10 +527,13 @@ def main(args: Args) -> None:
               f"|delta| {row['mean_abs_delta']:.3f} kl {row['approx_kl']:.4f} ({row['rollout_s']}s roll, "
               f"{row['total_s']}s total, {row['steps_run']} steps, {row['timing']})", flush=True)
         if it % args.save_every == 0 or it == args.iterations - 1:
-            ck = dict(residual=res.state_dict(), opt=opt.state_dict(), iteration=it, args=dataclasses.asdict(args))
+            ck = dict(residual=res.state_dict(), opt=opt.state_dict(), iteration=it, args=dataclasses.asdict(args),
+                      world_p=world_p)
             torch.save(ck, args.out / "last.pt")
             if it % (args.save_every * 10) == 0:
                 torch.save(ck, args.out / f"iter_{it:04d}.pt")
+        if (it + 1) % args.val_every == 0:
+            validate(it, res)
 
 
 if __name__ == "__main__":
