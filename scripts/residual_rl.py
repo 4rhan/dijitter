@@ -68,26 +68,26 @@ class Args:
     """Distinct training worlds (finding them costs one CPU scene build per candidate seed)."""
     eval_seed_start: int = 0
     eval_worlds: int = 50
-    envs: int = 8
+    envs: int = 4
     """Distinct worlds per iteration (one MJWarp batch each)."""
-    copies: int = 16
+    copies: int = 32
     """Rollouts per world per iteration."""
     max_steps: int = 900
     execute_steps: int = 25
     blend_steps: int = 10
-    infer_batch: int = 32
+    infer_batch: int = 64
     """pi0.5 micro-batch size."""
 
     # residual
     arm_scale: float = 0.05
     gripper_scale: float = 0.1
     hidden: int = 256
-    init_log_std: float = -0.5
+    init_log_std: float = -1.0
 
     # reward
     progress_weight: float = 10.0
     success_bonus: float = 5.0
-    action_penalty: float = 0.01
+    action_penalty: float = 0.001
 
     # PPO
     iterations: int = 400
