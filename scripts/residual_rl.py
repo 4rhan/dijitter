@@ -64,6 +64,8 @@ class Args:
     # worlds
     train_seed_start: int = 10_000
     """Training worlds come from here on, disjoint from the eval worlds (seeds 0..~240)."""
+    train_worlds: int = 48
+    """Distinct training worlds (finding them costs one CPU scene build per candidate seed)."""
     eval_seed_start: int = 0
     eval_worlds: int = 50
     envs: int = 8
@@ -404,7 +406,7 @@ def main(args: Args) -> None:
     if seed_file.exists():
         train_seeds = json.loads(seed_file.read_text())
     else:
-        train_seeds = select_seeds(envs[0], args.train_seed_start, 400 if not args.dry_run else 8,
+        train_seeds = select_seeds(envs[0], args.train_seed_start, args.train_worlds if not args.dry_run else 8,
                                    args.categories, args.sides)
         seed_file.write_text(json.dumps(train_seeds))
     res = Residual(OBS_DIM, ACT_DIM, args.hidden, args.init_log_std).cuda()
