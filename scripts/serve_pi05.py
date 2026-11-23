@@ -59,6 +59,24 @@ def load(args: Args):
     from lerobot.policies import make_policy, make_pre_post_processors
 
     ckpt = str(args.checkpoint.expanduser().resolve())
+    # A LoRA checkpoint names its base model by the path it was trained from. If that path is from
+    # another machine, LeRobot silently builds pi0.5 with RANDOM base weights (it only logs "Returning
+    # model without loading pretrained weights"), and the arm flails. Refuse instead.
+    import json as _json
+
+    for name in ("adapter_config.json", "config.json"):
+        cfg_file = Path(ckpt) / name
+        if not cfg_file.exists():
+            continue
+        cfg_json = _json.loads(cfg_file.read_text())
+        for key in ("base_model_name_or_path", "pretrained_path"):
+            base = cfg_json.get(key)
+            if isinstance(base, str) and base.startswith("/") and not Path(base).exists():
+                raise SystemExit(
+                    f"{cfg_file}: {key} = {base} does not exist on this machine, so pi0.5 would load with random "
+                    f"base weights. Point it at a local pi05_base snapshot (same weights), e.g. with sed on the "
+                    f"checkpoint's *.json files."
+                )
     meta = LeRobotDatasetMetadata(args.repo_id, root=args.root.expanduser() / args.repo_id)
     cfg = PreTrainedConfig.from_pretrained(ckpt)
     cfg.pretrained_path = ckpt
