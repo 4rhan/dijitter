@@ -163,11 +163,17 @@ def make_env(copies: int):
 def reset_copies(env, seed: int):
     """Reset every world of `env` to world `seed`: one CPU reset, replicated (BatchedWarpYAMEnv.reset
     would rebuild the same scene once per copy)."""
-    from abc_sim.batched_env import PerWorldEvaluators
-
     base = env.base_env
     base.forget_arm_state()
     base.reset(seed=seed, randomize=True)
+    return load_copies(env, seed)
+
+
+def load_copies(env, seed: int):
+    """Copy the base env's current scene into every world of the batch."""
+    from abc_sim.batched_env import PerWorldEvaluators
+
+    base = env.base_env
     n = env.num_worlds
     env.seeds = [seed] * n
     env.randomization = [base._last_randomization] * n
