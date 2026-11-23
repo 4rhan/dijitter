@@ -77,6 +77,10 @@ class Args:
     blend_steps: int = 10
     infer_batch: int = 64
     """pi0.5 micro-batch size."""
+    render: Literal["cpu", "gpu"] = "cpu"
+    """Camera images for pi0.5: "cpu" = MuJoCo's OpenGL renderer, as in the training demos and eval_sim
+    (54%); "gpu" = MJWarp's ray tracer, which lights the scene differently (white table) and drops
+    pi0.5 to ~14%."""
 
     # residual
     arm_scale: float = 0.05
@@ -203,6 +207,33 @@ def select_seeds(env, start: int, count: int, categories, sides) -> list[int]:
     return seeds
 
 
+class CpuCameras:
+    """Render a batch's worlds with MuJoCo's OpenGL renderer from the MJWarp state (positions only)."""
+
+    def __init__(self):
+        self.model = self.data = self.renderer = None
+
+    def __call__(self, env) -> dict[str, torch.Tensor]:
+        import mujoco
+
+        m = env.base_env.model
+        if m is not self.model:
+            if self.renderer is not None:
+                self.renderer.close()
+            self.model, self.data = m, mujoco.MjData(m)
+            self.renderer = mujoco.Renderer(m, height=168, width=224)
+        n = env.num_worlds
+        out = {c: np.empty((n, 3, 168, 224), np.uint8) for c in CAMERA_KEYS}
+        for i in range(n):
+            self.data.qpos[:] = env.qpos[i]
+            mujoco.mj_kinematics(m, self.data)
+            mujoco.mj_camlight(m, self.data)
+            for c in CAMERA_KEYS:
+                self.renderer.update_scene(self.data, camera=c)
+                out[c][i] = self.renderer.render().transpose(2, 0, 1)
+        return {c: torch.from_numpy(v).cuda() for c, v in out.items()}
+
+
 # --------------------------------------------------------------------------- pi0.5
 
 class Pi05:
@@ -229,6 +260,7 @@ class Pi05:
 
 # --------------------------------------------------------------------------- rollout
 
+_CPU_CAMS: list = []
 OBS_DIM = 14 + 7 + 14 + 1 + 1  # state, object pose, base action, chunk phase, time
 ACT_DIM = 14
 
@@ -239,6 +271,10 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
     scale = torch.full((ACT_DIM,), args.arm_scale, device="cuda")
     scale[list(GRIPPERS)] = args.gripper_scale
     adrs = [reset_copies(env, s) for env, s in zip(envs, seeds)]
+    global _CPU_CAMS
+    if args.render == "cpu" and len(_CPU_CAMS) < len(envs):
+        _CPU_CAMS += [CpuCameras() for _ in range(len(envs) - len(_CPU_CAMS))]
+    cpu_cams = _CPU_CAMS if args.render == "cpu" else None
     obs_l, raw_l, logp_l, rew_l, alive_l, val_l = [], [], [], [], [], []
     prev_prog = np.zeros(B, np.float32)
     done = np.zeros(B, bool)
@@ -253,7 +289,7 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
         k = t % args.execute_steps
         if k == 0:
             t1 = time.perf_counter(); tm["other"] += t1 - t_last
-            cams = [env.render_cameras() for env in envs]
+            cams = [cpu_cams[e](env) if cpu_cams else env.render_cameras() for e, env in enumerate(envs)]
             images = {c: torch.cat([cam[c] for cam in cams]) for c in CAMERA_KEYS}
             torch.cuda.synchronize(); t2 = time.perf_counter(); tm["render"] += t2 - t1
             prev, used = chunk, args.execute_steps
