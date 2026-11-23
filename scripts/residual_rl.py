@@ -96,6 +96,26 @@ class Args:
     success_bonus: float = 5.0
     action_penalty: float = 0.001
 
+    algo: Literal["ppo", "td3"] = "ppo"
+    """ppo: on-policy, each rollout used once. td3: off-policy with a replay buffer (as in ResFiT /
+    Policy Decorator), every transition reused for many updates."""
+    # TD3
+    td3_explore: float = 0.3
+    """Exploration noise on the residual's [-1, 1] action (x arm_scale = ~0.015 rad, held act_every steps)."""
+    td3_updates: int = 1500
+    """Gradient steps per rollout (one rollout = ~23k decisions)."""
+    td3_batch: int = 1024
+    td3_buffer: int = 2_000_000
+    td3_tau: float = 0.005
+    td3_policy_delay: int = 2
+    td3_target_noise: float = 0.2
+    td3_noise_clip: float = 0.5
+    td3_warmup_rollouts: int = 2
+    td3_stay_close: float = 0.05
+    """Actor loss weight on |residual|^2: a correction has to earn its size in Q (keeps the actor from
+    saturating at +-scale wherever the critic extrapolates)."""
+    """Rollouts before the actor starts updating (the critics learn from the first one)."""
+
     # PPO
     iterations: int = 400
     lr: float = 5e-4
@@ -158,6 +178,48 @@ class Residual(nn.Module):
 
     def value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.v(self.norm(obs)).squeeze(-1)
+
+    def act(self, obs: torch.Tensor, stochastic: bool):
+        d = self.dist(obs)
+        raw = d.sample() if stochastic else d.mean
+        return raw, d.log_prob(raw).sum(-1), self.value(obs)
+
+
+def mlp(i: int, o: int, h: int, layer_norm: bool = False) -> nn.Sequential:
+    ln = (lambda: nn.LayerNorm(h)) if layer_norm else nn.Identity
+    return nn.Sequential(nn.Linear(i, h), ln(), nn.ReLU(), nn.Linear(h, h), ln(), nn.ReLU(), nn.Linear(h, o))
+
+
+class TD3Agent(nn.Module):
+    """Deterministic residual actor + twin critics (LayerNorm, as ResFiT uses for stability)."""
+
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int, explore: float):
+        super().__init__()
+        self.norm = RunningNorm(obs_dim)
+        self.actor = mlp(obs_dim, act_dim, hidden)
+        nn.init.zeros_(self.actor[-1].weight)  # starts as "no correction"
+        nn.init.zeros_(self.actor[-1].bias)
+        self.q1, self.q2 = mlp(obs_dim + act_dim, 1, hidden, True), mlp(obs_dim + act_dim, 1, hidden, True)
+        self.explore = explore
+        self.log_std = nn.Parameter(torch.full((act_dim,), float(np.log(max(explore, 1e-6)))), requires_grad=False)
+
+    def pi(self, obs_n: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.actor(obs_n))
+
+    def q(self, obs_n, a):
+        x = torch.cat([obs_n, a], -1)
+        return self.q1(x).squeeze(-1), self.q2(x).squeeze(-1)
+
+    def act(self, obs: torch.Tensor, stochastic: bool):
+        a = self.pi(self.norm(obs))
+        if stochastic:
+            a = a + self.explore * torch.randn_like(a)
+        a = a.clamp(-0.999, 0.999)
+        zero = torch.zeros(obs.shape[0], device=obs.device)
+        return torch.atanh(a), zero, zero  # rollout() applies tanh again
+
+    def value(self, obs: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(obs.shape[0], device=obs.device)
 
 
 # --------------------------------------------------------------------------- sim
@@ -336,9 +398,7 @@ def rollout(args: Args, pi05: Pi05, envs, seeds: list[int], residual: Residual |
                 logp = val = torch.zeros(B, device="cuda")
             else:
                 with torch.no_grad():
-                    d = residual.dist(o_t)
-                    raw = d.sample() if stochastic else d.mean
-                    logp, val = d.log_prob(raw).sum(-1), residual.value(o_t)
+                    raw, logp, val = residual.act(o_t, stochastic)
             squashed = torch.tanh(raw)
             delta = (squashed * scale).cpu().numpy()
             penalty = (squashed ** 2).sum(-1).cpu().numpy()
@@ -421,6 +481,78 @@ def ppo_update(args: Args, res: Residual, opt, ro):
     return dict(zip(["pg_loss", "v_loss", "entropy", "approx_kl"], np.mean(stats, 0).tolist()), transitions=n)
 
 
+class Replay:
+    def __init__(self, cap: int, obs_dim: int, act_dim: int):
+        self.cap, self.n, self.i = cap, 0, 0
+        z = lambda *shape: torch.zeros((cap, *shape), device="cuda")
+        self.o, self.a, self.r, self.o2, self.d = z(obs_dim), z(act_dim), z(), z(obs_dim), z()
+
+    def add(self, o, a, r, o2, d):
+        for k in range(0, o.shape[0], self.cap):
+            sl = slice(k, k + self.cap)
+            m = o[sl].shape[0]
+            idx = (torch.arange(m, device="cuda") + self.i) % self.cap
+            for buf, x in ((self.o, o), (self.a, a), (self.r, r), (self.o2, o2), (self.d, d)):
+                buf[idx] = torch.as_tensor(x[sl], device="cuda", dtype=torch.float32)
+            self.i = (self.i + m) % self.cap
+            self.n = min(self.n + m, self.cap)
+
+    def sample(self, b: int):
+        idx = torch.randint(0, self.n, (b,), device="cuda")
+        return self.o[idx], self.a[idx], self.r[idx], self.o2[idx], self.d[idx]
+
+
+def transitions(ro):
+    """(o, a, r, o', done) per decision. A world's last decision is kept only if it ended in success
+    (no next state is needed); a truncated last decision is dropped."""
+    obs, raw, rew, alive = ro["obs"], ro["raw"], ro["rew"], ro["alive"]
+    D = obs.shape[0]
+    o, a, r, o2, d = [], [], [], [], []
+    for t in range(D):
+        if t + 1 < D:
+            m = alive[t]
+            nxt, done = obs[t + 1][m], ~alive[t + 1][m]
+        else:
+            m = alive[t] & ro["success"]
+            nxt, done = obs[t][m], np.ones(m.sum(), bool)
+        o.append(obs[t][m]); a.append(np.tanh(raw[t][m])); r.append(rew[t][m]); o2.append(nxt); d.append(done)
+    cat = lambda xs: np.concatenate(xs)
+    return cat(o), cat(a), cat(r).astype(np.float32), cat(o2), cat(d).astype(np.float32)
+
+
+def td3_update(args: Args, ag: TD3Agent, targ: TD3Agent, opt_a, opt_q, buf: Replay, train_actor: bool):
+    gamma = args.gamma ** args.act_every
+    stats = []
+    for u in range(args.td3_updates):
+        o, a, r, o2, d = buf.sample(args.td3_batch)
+        on, o2n = ag.norm(o), ag.norm(o2)
+        with torch.no_grad():
+            noise = (torch.randn_like(a) * args.td3_target_noise).clamp(-args.td3_noise_clip, args.td3_noise_clip)
+            a2 = (targ.pi(o2n) + noise).clamp(-1, 1)
+            q1t, q2t = targ.q(o2n, a2)
+            y = r + gamma * (1 - d) * torch.min(q1t, q2t)
+        q1, q2 = ag.q(on, a)
+        lq = ((q1 - y) ** 2).mean() + ((q2 - y) ** 2).mean()
+        opt_q.zero_grad(); lq.backward(); nn.utils.clip_grad_norm_(list(ag.q1.parameters()) + list(ag.q2.parameters()), 10.0); opt_q.step()
+        la = torch.zeros(())
+        if train_actor and u % args.td3_policy_delay == 0:
+            pa = ag.pi(on)
+            la = -ag.q(on, pa)[0].mean() + args.td3_stay_close * (pa ** 2).sum(-1).mean()
+            opt_a.zero_grad(); la.backward(); opt_a.step()
+            with torch.no_grad():
+                for p, pt in zip(ag.parameters(), targ.parameters()):
+                    pt.mul_(1 - args.td3_tau).add_(args.td3_tau * p)
+        elif not train_actor:
+            with torch.no_grad():  # critics' targets still track
+                for p, pt in zip(list(ag.q1.parameters()) + list(ag.q2.parameters()),
+                                 list(targ.q1.parameters()) + list(targ.q2.parameters())):
+                    pt.mul_(1 - args.td3_tau).add_(args.td3_tau * p)
+        if u % 100 == 0:
+            stats.append([lq.item(), la.item(), q1.mean().item()])
+    s = np.mean(stats, 0)
+    return dict(q_loss=float(s[0]), actor_loss=float(s[1]), q_mean=float(s[2]), approx_kl=0.0, buffer=buf.n)
+
+
 # --------------------------------------------------------------------------- main
 
 def summary(ro, copies) -> dict:
@@ -449,7 +581,8 @@ def main(args: Args) -> None:
     if args.mode == "eval":
         res = None
         if args.residual is not None:
-            res = Residual(OBS_DIM, ACT_DIM, args.hidden, args.init_log_std).cuda()
+            res = (TD3Agent(OBS_DIM, ACT_DIM, args.hidden, args.td3_explore) if args.algo == "td3"
+                   else Residual(OBS_DIM, ACT_DIM, args.hidden, args.init_log_std)).cuda()
             res.load_state_dict(torch.load(args.residual, map_location="cuda")["residual"])
         seeds = select_seeds(envs[0], args.eval_seed_start, args.eval_worlds, args.categories, args.sides)
         rows = []
@@ -475,8 +608,18 @@ def main(args: Args) -> None:
         train_seeds = select_seeds(envs[0], args.train_seed_start, args.train_worlds if not args.dry_run else 8,
                                    args.categories, args.sides)
         seed_file.write_text(json.dumps(train_seeds))
-    res = Residual(OBS_DIM, ACT_DIM, args.hidden, args.init_log_std).cuda()
-    opt = torch.optim.Adam(res.parameters(), lr=args.lr)
+    if args.algo == "td3":
+        import copy
+
+        res = TD3Agent(OBS_DIM, ACT_DIM, args.hidden, args.td3_explore).cuda()
+        targ = copy.deepcopy(res)
+        opt_a = torch.optim.Adam(res.actor.parameters(), lr=3e-4)
+        opt_q = torch.optim.Adam(list(res.q1.parameters()) + list(res.q2.parameters()), lr=3e-4)
+        opt = opt_q
+        buf = Replay(args.td3_buffer, OBS_DIM, ACT_DIM)
+    else:
+        res = Residual(OBS_DIM, ACT_DIM, args.hidden, args.init_log_std).cuda()
+        opt = torch.optim.Adam(res.parameters(), lr=args.lr)
     start = 0
     if (args.out / "last.pt").exists():
         ck = torch.load(args.out / "last.pt", map_location="cuda")
@@ -516,7 +659,14 @@ def main(args: Args) -> None:
         for sd, pw in zip(seeds, summary(ro, args.copies)["per_world"]):
             world_p[sd] = pw if world_p[sd] is None else 0.5 * world_p[sd] + 0.5 * pw
         t_roll = time.time() - t_it
-        stats = ppo_update(args, res, opt, ro)
+        if args.algo == "td3":
+            tr = transitions(ro)
+            res.norm.update(torch.as_tensor(tr[0], device="cuda"))
+            targ.norm.load_state_dict(res.norm.state_dict())
+            buf.add(*tr)
+            stats = td3_update(args, res, targ, opt_a, opt_q, buf, train_actor=it - start >= args.td3_warmup_rollouts)
+        else:
+            stats = ppo_update(args, res, opt, ro)
         row = dict(iteration=it, **summary(ro, args.copies), seeds=seeds,
                    ep_return=float(ro["rew"].sum(0).mean()),
                    mean_abs_delta=float(np.abs(np.tanh(ro["raw"][ro["alive"]])).mean()),
@@ -525,7 +675,9 @@ def main(args: Args) -> None:
         log.write(json.dumps(row) + "\n"); log.flush()
         print(f"it {it}: success {row['success']:.3f} progress {row['progress']:.3f} return {row['ep_return']:.2f} "
               f"|delta| {row['mean_abs_delta']:.3f} kl {row['approx_kl']:.4f} ({row['rollout_s']}s roll, "
-              f"{row['total_s']}s total, {row['steps_run']} steps, {row['timing']})", flush=True)
+              f"{row['total_s']}s total, {row['steps_run']} steps, {row['timing']})"
+              + (f" q {row['q_mean']:.2f} q_loss {row['q_loss']:.3f} buffer {row['buffer']}" if args.algo == "td3" else ""),
+              flush=True)
         if it % args.save_every == 0 or it == args.iterations - 1:
             ck = dict(residual=res.state_dict(), opt=opt.state_dict(), iteration=it, args=dataclasses.asdict(args),
                       world_p=world_p)
